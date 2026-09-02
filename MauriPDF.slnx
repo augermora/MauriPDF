@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/MauriPDF.App/MauriPDF.App.csproj" />
+    <Project Path="src/MauriPDF.Core/MauriPDF.Core.csproj" />
+    <Project Path="src/MauriPDF.Editing/MauriPDF.Editing.csproj" />
+    <Project Path="src/MauriPDF.Infrastructure/MauriPDF.Infrastructure.csproj" />
+    <Project Path="src/MauriPDF.Rendering/MauriPDF.Rendering.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/MauriPDF.Core.Tests/MauriPDF.Core.Tests.csproj" />
+    <Project Path="tests/MauriPDF.Editing.Tests/MauriPDF.Editing.Tests.csproj" />
+    <Project Path="tests/MauriPDF.Infrastructure.Tests/MauriPDF.Infrastructure.Tests.csproj" />
+    <Project Path="tests/MauriPDF.Rendering.Tests/MauriPDF.Rendering.Tests.csproj" />
+  </Folder>
+</Solution>

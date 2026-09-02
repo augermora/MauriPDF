@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../MauriPDF.Core/MauriPDF.Core.csproj" />
+  </ItemGroup>
+</Project>
