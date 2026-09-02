@@ -12,7 +12,11 @@ The independent application core. It has no project references and must not refe
 
 ### MauriPDF.Rendering
 
-The PDF rendering implementation boundary. It references Core. Rendering APIs will be designed during the rendering milestone, after a PDF engine has been evaluated.
+The PDF rendering implementation boundary. It references Core and is the only project that references PDFiumCore. PDFiumCore and native PDFium handles are implementation details and must not appear in Core or App APIs.
+
+The selected rendering engine is PDFium, currently consumed through PDFiumCore 154.0.8035. A rendering session owns its PDFium document handle. Page and PDFium bitmap handles exist only for the duration of a render call and are closed before the call returns.
+
+Rendered pixels cross the boundary as a Core `RenderedPage`: an owned, UI-neutral BGRA32 memory buffer with dimensions and stride. The caller disposes this buffer. MauriPDF.App copies it into a WinForms `Bitmap`; neither `System.Drawing.Bitmap` nor PDFium types are exposed by Core.
 
 ### MauriPDF.Editing
 

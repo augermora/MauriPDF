@@ -5,6 +5,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PlatformTarget>x64</PlatformTarget>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
@@ -12,5 +13,10 @@
     <ProjectReference Include="../MauriPDF.Rendering/MauriPDF.Rendering.csproj" />
     <ProjectReference Include="../MauriPDF.Editing/MauriPDF.Editing.csproj" />
     <ProjectReference Include="../MauriPDF.Infrastructure/MauriPDF.Infrastructure.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="../../LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../../THIRD-PARTY-NOTICES.md" Link="THIRD-PARTY-NOTICES.md" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

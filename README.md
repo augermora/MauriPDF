@@ -8,7 +8,7 @@ The project is privacy-first and local-first: it requires no account, includes n
 
 MauriPDF is in early development. The `0.1-alpha.1` milestone is focused on opening a local PDF, determining its page count, rendering and navigating pages, zooming, fitting a page to the available width, and closing the document.
 
-PDF functionality has not been implemented and no PDF library has been selected yet.
+An initial one-page rendering spike uses PDFium through PDFiumCore. Navigation, zoom, caching, and editing are not implemented yet.
 
 ## Requirements
 
@@ -39,3 +39,5 @@ dotnet test MauriPDF.slnx --configuration Release --no-build
 MauriPDF is licensed under the GNU General Public License version 3. See [LICENSE](LICENSE).
 
 Dependencies and distributed artifacts must be compatible with GPLv3 and satisfy all applicable source-code and notice requirements.
+
+See [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) for rendering dependency notices.
