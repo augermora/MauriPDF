@@ -8,7 +8,9 @@ The project is privacy-first and local-first: it requires no account, includes n
 
 MauriPDF is in early development. The `0.1-alpha.1` milestone is focused on opening a local PDF, determining its page count, rendering and navigating pages, zooming, fitting a page to the available width, and closing the document.
 
-An initial one-page rendering spike uses PDFium through PDFiumCore. Navigation, zoom, caching, and editing are not implemented yet.
+The basic single-page viewer uses PDFium through PDFiumCore and supports local PDF opening, previous/next and direct page navigation, 25–500% manual zoom, reset to 100%, Fit Page, Fit Width, and scrolling. Fit modes respond to window resizing; zoom changes render fresh PDF pixels rather than scaling an existing image. Caching, prefetching, thumbnails, search, annotations, and editing are not implemented.
+
+Enter a page number and press Enter to navigate. Keyboard shortcuts: Left/Page Up and Right/Page Down for navigation; Home/End for first/last page; Ctrl++ and Ctrl+- for zoom; Ctrl+0 for 100%; Ctrl+O to open. While the page-number field is focused, unmodified navigation keys retain their normal text-editing behavior.
 
 ## Requirements
 

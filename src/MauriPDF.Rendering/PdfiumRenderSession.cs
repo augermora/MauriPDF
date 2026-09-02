@@ -60,11 +60,12 @@ internal sealed class PdfiumRenderSession : IPdfRenderSession
 
         IMemoryOwner<byte>? pixelOwner = null;
         FpdfBitmapT? bitmap = null;
+        MemoryHandle pinnedPixels = default;
 
         try
         {
             pixelOwner = MemoryPool<byte>.Shared.Rent(byteLength);
-            using MemoryHandle pinnedPixels = pixelOwner.Memory[..byteLength].Pin();
+            pinnedPixels = pixelOwner.Memory[..byteLength].Pin();
 
             bitmap = fpdfview.FPDFBitmapCreateEx(
                 pixelWidth,
@@ -110,6 +111,8 @@ internal sealed class PdfiumRenderSession : IPdfRenderSession
             }
             finally
             {
+                // Destroy the native bitmap before unpinning its borrowed backing memory.
+                pinnedPixels.Dispose();
                 pixelOwner?.Dispose();
                 fpdfview.FPDF_ClosePage(page);
             }

@@ -47,10 +47,26 @@ Dependencies point toward Core. Core has no dependency on outer projects.
 ## Resource and performance principles
 
 - Native handles, streams, rendered buffers, and caches must have explicit ownership and lifetime rules.
-- Rendering should be cancellable where supported by the selected engine.
-- Page caches must be bounded by estimated memory cost rather than page count alone.
-- Only visible pages and a small prefetch window should be rendered.
+- Rendering is currently synchronous and limited to the selected page. There is no cache, prefetching, or rendering scheduler.
 - Concrete PDF packages must be evaluated for performance, deployment, file-locking behavior, robustness, and GPLv3 compatibility before adoption.
+
+## Single-page viewer
+
+Core's immutable `ViewerState` holds page count, zero-based page index, last manual zoom percentage, and the active mode (Manual, Fit Page, or Fit Width). Page entry is one-based and clamped to the document range; nonnumeric input is rejected by restoring the current page number. Opening a document resets to page 1 at manual 100%. The App commits a requested state only after rendering succeeds, preserving the previous image/state on a navigation or zoom failure.
+
+Manual zoom ranges from 25% to 500%, in 25-percentage-point steps. 100% consistently means 96 output pixels per inch, or 96/72 pixels per PDF point. +/- leaves a fit mode and resumes from the last manual percentage; the 100% button resets it. This is a fixed raster scale, not a physical-screen-size calibration.
+
+`RenderSizeCalculator` uses one scale for both dimensions:
+
+- Manual: `96 / 72 * zoomPercent / 100` pixels per point.
+- Fit Page: the smaller of viewport-width/page-width and viewport-height/page-height.
+- Fit Width: viewport-width/page-width, reserving vertical scrollbar width when the page would exceed viewport height.
+
+Manual pixel dimensions round to the nearest integer; fit dimensions round down so they cannot overflow the viewport. Both have a one-pixel minimum and preserve aspect ratio to integer-pixel precision. Fit modes are viewport-driven rather than limited by the manual percentage bounds. The rendering adapter's existing allocation safety limit still applies.
+
+The App measures the full document viewport independently of scrollbars left by the previous image. Fit modes recalculate after a 150 ms resize debounce; manual zoom keeps its raster size. No rendering is repeated when the current state and target size are unchanged. Page, zoom, and explicit fit changes reset scrolling to the top; the scrollable panel supports inspecting larger pages with scrollbars or the mouse wheel.
+
+Every changed target size is passed to the existing `RenderPage(index, width, height)` API for a fresh PDFium render, never bitmap scaling. The App copies each `RenderedPage` into a new WinForms bitmap, disposes the neutral buffer immediately, and disposes the old displayed bitmap when replacing it. The native bitmap is destroyed before unpinning its borrowed buffer; page handles remain scoped to each render and sessions to the open document.
 
 ## Initial milestone
 
