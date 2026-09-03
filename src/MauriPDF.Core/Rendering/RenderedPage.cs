@@ -27,6 +27,7 @@ public sealed class RenderedPage : IDisposable
         Height = height;
         Stride = stride;
         PixelFormat = pixelFormat;
+        AllocatedBytes = pixelOwner.Memory.Length;
         _pixelOwner = pixelOwner;
     }
 
@@ -37,6 +38,9 @@ public sealed class RenderedPage : IDisposable
     public int Stride { get; }
 
     public RenderedPixelFormat PixelFormat { get; }
+
+    /// <summary>Backing allocation size, including any pool capacity beyond visible pixels.</summary>
+    public int AllocatedBytes { get; }
 
     public ReadOnlyMemory<byte> Pixels => (_pixelOwner ?? throw new ObjectDisposedException(nameof(RenderedPage)))
         .Memory[.._byteLength];

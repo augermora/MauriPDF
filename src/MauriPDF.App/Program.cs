@@ -11,8 +11,16 @@ internal static class Program
 
         try
         {
-            using PdfiumRenderer renderer = new();
-            Application.Run(new MainForm(renderer));
+            PdfViewerRenderer renderer = new(() => new PdfiumRenderer());
+            try
+            {
+                Application.Run(new MainForm(renderer));
+            }
+            finally
+            {
+                // The window is closed: drain native work before releasing the engine.
+                renderer.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            }
         }
         catch (Exception exception)
         {

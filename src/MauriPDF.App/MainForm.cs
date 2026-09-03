@@ -1,12 +1,13 @@
 using System.Globalization;
-using MauriPDF.Core.Rendering;
 using MauriPDF.Core.Viewing;
+using MauriPDF.Rendering;
 
 namespace MauriPDF.App;
 
 internal sealed class MainForm : Form
 {
-    private readonly IPdfRenderer _renderer;
+    private readonly PdfViewerRenderer _renderer;
+    private readonly ToolStripLabel _loading = new();
     private readonly ToolStripButton _previous = new("<") { ToolTipText = "Previous page" };
     private readonly ToolStripButton _next = new(">") { ToolTipText = "Next page" };
     private readonly ToolStripTextBox _pageNumber = new() { AutoSize = false, Width = 55, AccessibleName = "Page number" };
@@ -23,12 +24,15 @@ internal sealed class MainForm : Form
     };
     private readonly PictureBox _pageView = new() { SizeMode = PictureBoxSizeMode.Normal, TabStop = false };
     private readonly System.Windows.Forms.Timer _resizeTimer = new() { Interval = 150 };
-    private IPdfRenderSession? _session;
     private ViewerState? _state;
-    private bool _rendering;
+    private ViewerState? _displayedState;
+    private bool _updatingImage;
+    private long _requestId;
     private bool _resourcesDisposed;
+    private bool _closing;
+    private bool _shutdownComplete;
 
-    public MainForm(IPdfRenderer renderer)
+    public MainForm(PdfViewerRenderer renderer)
     {
         _renderer = renderer;
         Text = "MauriPDF";
@@ -58,7 +62,7 @@ internal sealed class MainForm : Form
         ToolStrip toolbar = new() { GripStyle = ToolStripGripStyle.Hidden };
         toolbar.Items.AddRange([
             open, new ToolStripSeparator(), _previous, _pageNumber, _totalPages, _next,
-            new ToolStripSeparator(), _zoomOut, _resetZoom, _zoomIn, _zoomLabel, _fitPage, _fitWidth
+            new ToolStripSeparator(), _zoomOut, _resetZoom, _zoomIn, _zoomLabel, _fitPage, _fitWidth, _loading
         ]);
         _viewport.Controls.Add(_pageView);
         Controls.Add(_viewport);
@@ -113,8 +117,36 @@ internal sealed class MainForm : Form
         base.Dispose(disposing);
     }
 
-    private void ChooseDocument()
+    protected override async void OnFormClosing(FormClosingEventArgs e)
     {
+        base.OnFormClosing(e);
+        if (_shutdownComplete || e.Cancel) return;
+        e.Cancel = true;
+        if (_closing) return;
+        _closing = true;
+        ++_requestId;
+        _resizeTimer.Stop();
+        _loading.Text = "Closing...";
+        try
+        {
+            // Keep the message loop alive until canceled await continuations have disposed their results.
+            await _renderer.DisposeAsync();
+            await Task.Yield();
+        }
+        catch (Exception exception)
+        {
+            ShowError(exception);
+        }
+        finally
+        {
+            _shutdownComplete = true;
+            Close();
+        }
+    }
+
+    private async void ChooseDocument()
+    {
+        if (_closing) return;
         using OpenFileDialog dialog = new()
         {
             CheckFileExists = true,
@@ -126,24 +158,31 @@ internal sealed class MainForm : Form
             return;
         }
 
-        CloseDocument();
+        CloseDocument(keepImage: true);
+        long requestId = ++_requestId;
+        _loading.Text = "Opening...";
         try
         {
-            _session = _renderer.Open(dialog.FileName);
-            ViewerState initial = new(_session.PageCount);
-            if (ChangeState(initial))
+            int pageCount = await _renderer.OpenAsync(dialog.FileName);
+            if (_resourcesDisposed || requestId != _requestId)
             {
-                Text = $"MauriPDF — {Path.GetFileName(dialog.FileName)}";
+                return;
             }
-            else
-            {
-                CloseDocument();
-            }
+
+            Text = $"MauriPDF — {Path.GetFileName(dialog.FileName)}";
+            ChangeState(new ViewerState(pageCount));
+        }
+        catch (OperationCanceledException)
+        {
+            // Superseded opens/renders are normal, not user-facing errors.
         }
         catch (Exception exception)
         {
-            CloseDocument();
-            ShowError(exception);
+            if (!_resourcesDisposed && requestId == _requestId)
+            {
+                _loading.Text = string.Empty;
+                ShowError(exception);
+            }
         }
     }
 
@@ -167,35 +206,48 @@ internal sealed class MainForm : Form
         _viewport.Focus();
     }
 
-    private bool ChangeState(ViewerState? requested, bool resetScroll = true)
+    private async void ChangeState(ViewerState? requested, bool resetScroll = true)
     {
-        if (_session is null || requested is null || _rendering)
+        if (requested is null || _resourcesDisposed || _closing)
         {
-            return false;
+            return;
         }
 
         _resizeTimer.Stop();
-        _rendering = true;
+        long requestId = ++_requestId;
+        // Navigation advances from the requested state, not the last completed page.
+        _state = requested;
+        UpdateToolbar();
+        _loading.Text = "Rendering...";
         try
         {
             // Recover the full client area independent of the CURRENT bitmap's scrollbars.
             int width = _viewport.ClientSize.Width + (_viewport.VerticalScroll.Visible ? SystemInformation.VerticalScrollBarWidth : 0);
             int height = _viewport.ClientSize.Height + (_viewport.HorizontalScroll.Visible ? SystemInformation.HorizontalScrollBarHeight : 0);
-            RenderSize size = RenderSizeCalculator.Calculate(
-                _session.GetPageSize(requested.PageIndex), requested, Math.Max(1, width), Math.Max(1, height),
-                SystemInformation.VerticalScrollBarWidth);
-
-            if (_state != requested || _pageView.Image is null || _pageView.Image.Width != size.Width || _pageView.Image.Height != size.Height)
+            using ViewerRenderResult result = await _renderer.RenderAsync(
+                requested, Math.Max(1, width), Math.Max(1, height), SystemInformation.VerticalScrollBarWidth);
+            // Also guard after await: completion may have been posted before a newer UI request.
+            if (_resourcesDisposed || requestId != _requestId)
             {
-                using RenderedPage pixels = _session.RenderPage(requested.PageIndex, size.Width, size.Height);
-                Bitmap nextImage = WinFormsImageConverter.CreateBitmap(pixels);
+                return;
+            }
+
+            Bitmap nextImage = WinFormsImageConverter.CreateBitmap(result.Pixels);
+            _updatingImage = true;
+            try
+            {
                 Image? previousImage = _pageView.Image;
                 _pageView.Image = nextImage;
                 _pageView.Size = nextImage.Size;
                 previousImage?.Dispose();
             }
+            finally
+            {
+                _updatingImage = false;
+            }
 
-            _state = requested;
+            _displayedState = requested;
+            System.Diagnostics.Debug.WriteLine($"Displayed page {requested.PageIndex + 1}: {(result.FromCache ? "cache" : "fresh render")}");
             if (resetScroll)
             {
                 _viewport.AutoScrollPosition = Point.Empty;
@@ -203,24 +255,33 @@ internal sealed class MainForm : Form
             }
 
             UpdateToolbar();
-            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            // No error dialog for canceled/obsolete work.
         }
         catch (Exception exception)
         {
-            // Only commit navigation/zoom after a successful render; retain the previous image on failure.
-            UpdateToolbar();
-            ShowError(exception);
-            return false;
+            if (!_resourcesDisposed && requestId == _requestId)
+            {
+                _state = _displayedState ?? requested;
+                UpdateToolbar();
+                _loading.Text = string.Empty;
+                ShowError(exception);
+            }
         }
         finally
         {
-            _rendering = false;
+            if (!_resourcesDisposed && requestId == _requestId)
+            {
+                _loading.Text = string.Empty;
+            }
         }
     }
 
     private void ScheduleFitRender()
     {
-        if (_rendering || _state is null || _state.ZoomMode == ViewerZoomMode.Manual)
+        if (_closing || _updatingImage || _state is null || _state.ZoomMode == ViewerZoomMode.Manual)
         {
             return;
         }
@@ -244,17 +305,21 @@ internal sealed class MainForm : Form
         _zoomLabel.Text = _state?.ZoomMode == ViewerZoomMode.Manual ? $"{_state.ZoomPercent}%" : string.Empty;
     }
 
-    private void CloseDocument()
+    private void CloseDocument(bool keepImage = false)
     {
+        ++_requestId;
         _resizeTimer.Stop();
-        Image? image = _pageView.Image;
-        _pageView.Image = null;
-        image?.Dispose();
-        _session?.Dispose();
-        _session = null;
+        if (!keepImage)
+        {
+            Image? image = _pageView.Image;
+            _pageView.Image = null;
+            image?.Dispose();
+            _pageView.Size = Size.Empty;
+            _viewport.AutoScrollPosition = Point.Empty;
+        }
         _state = null;
-        _pageView.Size = Size.Empty;
-        _viewport.AutoScrollPosition = Point.Empty;
+        _displayedState = null;
+        _loading.Text = string.Empty;
         UpdateToolbar();
         Text = "MauriPDF";
     }
