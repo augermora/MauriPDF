@@ -229,8 +229,128 @@ public sealed class PdfViewerRendererTests
         return Assert.IsType<Task<ViewerRenderResult>>(task, exactMatch: false);
     }
 
+    [Fact]
+    public async Task GeometryOpenDoesNotRenderEvenFor1001Pages()
+    {
+        FakeEngine engine = new() { PageCount = 1001 };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        IReadOnlyList<PdfPageSize> pages = await viewer.OpenDocumentAsync("large");
+        Assert.Equal(1001, pages.Count);
+        Assert.All(pages, size => Assert.Equal(new PdfPageSize(72, 72), size));
+        Assert.Equal(0, engine.RenderCount);
+    }
+
+    [Fact]
+    public async Task VisibleBatchReplacesObsoleteRangeAndRunsBeforeThumbnails()
+    {
+        FakeEngine engine = new() { BlockFirst = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        IReadOnlyList<Task<ViewerRenderResult>> old = viewer.RenderVisible([new(0, new(96, 96)), new(1, new(96, 96))]);
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Task<ViewerRenderResult> thumbnail = Thumbnail(viewer, 9);
+            IReadOnlyList<Task<ViewerRenderResult>> latest = viewer.RenderVisible([new(5, new(96, 96)), new(6, new(96, 96))]);
+            Assert.All(old, task => Assert.True(task.IsCanceled));
+            engine.Release.Set();
+            foreach (Task<ViewerRenderResult> task in latest) { using ViewerRenderResult result = await task; }
+            using ViewerRenderResult thumb = await thumbnail;
+            Assert.Equal([0, 5, 6, 9], engine.RenderOrder);
+            Assert.Equal(1, engine.Owners[0].DisposeCount);
+        }
+        finally { engine.Release.Set(); }
+    }
+
+    [Fact]
+    public async Task ReturningVisiblePageReusesExactSizeCache()
+    {
+        FakeEngine engine = new();
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        using ViewerRenderResult first = await viewer.RenderVisible([new(2, new(120, 160))])[0];
+        using ViewerRenderResult other = await viewer.RenderVisible([new(3, new(120, 160))])[0];
+        using ViewerRenderResult returned = await viewer.RenderVisible([new(2, new(120, 160))])[0];
+        Assert.True(returned.FromCache);
+        using ViewerRenderResult resized = await viewer.RenderVisible([new(2, new(240, 320))])[0];
+        Assert.False(resized.FromCache);
+        Assert.Equal(3, engine.RenderCount);
+    }
+
+    [Fact]
+    public async Task ReplacementCancelsEntireVisibleBatchAndClearsCache()
+    {
+        FakeEngine engine = new() { BlockFirst = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        IReadOnlyList<Task<ViewerRenderResult>> old = viewer.RenderVisible([new(0, new(96, 96)), new(1, new(96, 96))]);
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Task<int> opened = viewer.OpenAsync("second");
+            Assert.All(old, task => Assert.True(task.IsCanceled));
+            engine.Release.Set();
+            await opened;
+            using ViewerRenderResult current = await viewer.RenderVisible([new(0, new(96, 96))])[0];
+            Assert.False(current.FromCache);
+            Assert.Equal(1, engine.ClosedDocuments);
+            Assert.Equal([0, 0], engine.RenderOrder);
+        }
+        finally { engine.Release.Set(); }
+    }
+
+    [Fact]
+    public async Task RapidRangesDoNotAccumulateNativeRenderJobs()
+    {
+        FakeEngine engine = new() { BlockFirst = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        IReadOnlyList<Task<ViewerRenderResult>> previous = viewer.RenderVisible([new(0, new(96, 96))]);
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            for (int index = 0; index < 1000; index++)
+            {
+                IReadOnlyList<Task<ViewerRenderResult>> next = viewer.RenderVisible([new(index % 10, new(96, 96))]);
+                Assert.All(previous, task => Assert.True(task.IsCanceled));
+                previous = next;
+            }
+            engine.Release.Set();
+            using ViewerRenderResult result = await previous[0];
+            Assert.Equal(2, engine.RenderCount);
+        }
+        finally { engine.Release.Set(); }
+    }
+
+    [Fact]
+    public async Task VisibleBatchRejectsUnboundedDemand()
+    {
+        await using PdfViewerRenderer viewer = new(() => new FakeEngine());
+        Assert.Throws<ArgumentOutOfRangeException>(() => viewer.RenderVisible(
+            Enumerable.Repeat(new PageRenderTarget(0, new(96, 96)), 33).ToArray()));
+    }
+
+    [Fact]
+    public async Task EmptyViewportResizeDoesNotCancelDocumentOpening()
+    {
+        FakeEngine engine = new() { BlockGeometry = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        Task<IReadOnlyList<PdfPageSize>> opened = viewer.OpenDocumentAsync("first");
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            viewer.CancelVisible();
+            Assert.False(opened.IsCanceled);
+            engine.Release.Set();
+            Assert.Equal(10, (await opened).Count);
+        }
+        finally { engine.Release.Set(); }
+    }
+
     private sealed class FakeEngine : IPdfRenderer
     {
+        public int PageCount { get; init; } = 10;
+        public bool BlockGeometry { get; init; }
         public bool BlockFirst { get; init; }
         public bool FailFirst { get; init; }
         public TaskCompletionSource Started { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -249,8 +369,16 @@ public sealed class PdfViewerRendererTests
 
         private sealed class Session(FakeEngine engine) : IPdfRenderSession
         {
-            public int PageCount => 10;
-            public PdfPageSize GetPageSize(int pageIndex) => new(72, 72);
+            public int PageCount => engine.PageCount;
+            public PdfPageSize GetPageSize(int pageIndex)
+            {
+                if (engine.BlockGeometry)
+                {
+                    engine.Started.TrySetResult();
+                    engine.Release.Wait();
+                }
+                return new(72, 72);
+            }
             public RenderedPage RenderPage(int pageIndex, int pixelWidth, int pixelHeight)
             {
                 engine.RenderCount++;
