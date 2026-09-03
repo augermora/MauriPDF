@@ -466,6 +466,168 @@ public sealed class PdfViewerRendererTests
         finally { engine.Release.Set(); await viewer.DisposeAsync(); }
     }
 
+    [Fact]
+    public async Task SearchUsesRasterInteractionGeometryScanThumbnailPriority()
+    {
+        FakeEngine engine = new() { BlockFirst = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        var initial = viewer.RenderVisible([new(0, new(96, 96))])[0];
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            long generation = viewer.BeginSearch();
+            var thumbnail = Thumbnail(viewer, 9);
+            var scan = viewer.SearchPageAsync(generation, 3, "d", 10);
+            var geometry = viewer.SearchGeometryAsync(generation, 2);
+            var interaction = viewer.ExtractTextAsync(1);
+            var foreground = viewer.RenderVisible([new(4, new(96, 96))])[0];
+            Assert.True(initial.IsCanceled);
+            engine.Release.Set();
+            using ViewerRenderResult rendered = await foreground;
+            await interaction;
+            await geometry;
+            Assert.Single((await scan).Matches);
+            using ViewerRenderResult thumb = await thumbnail;
+            Assert.Equal(["R0", "R4", "T1", "T2", "T3", "R9"], engine.WorkOrder);
+        }
+        finally { engine.Release.Set(); }
+    }
+
+    [Fact]
+    public async Task QueryReplacementAndCancellationRejectOldNativeScanResults()
+    {
+        FakeEngine engine = new() { BlockText = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        long old = viewer.BeginSearch();
+        var scan = viewer.SearchPageAsync(old, 0, "a", 10);
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            long current = viewer.BeginSearch();
+            Assert.True(scan.IsCanceled);
+            Assert.True(viewer.SearchPageAsync(old, 1, "a", 10).IsCanceled);
+            var replacement = viewer.SearchPageAsync(current, 1, "b", 10);
+            engine.Release.Set();
+            Assert.Single((await replacement).Matches);
+            Assert.Equal(2, engine.TextCount);
+            viewer.CancelSearch();
+            Assert.True(viewer.SearchGeometryAsync(current, 1).IsCanceled);
+        }
+        finally { engine.Release.Set(); }
+    }
+
+    [Fact]
+    public async Task DocumentReplacementInvalidatesScanAndHighlightRequests()
+    {
+        FakeEngine engine = new() { BlockText = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        long old = viewer.BeginSearch();
+        var scan = viewer.SearchPageAsync(old, 0, "a", 10);
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            var geometry = viewer.SearchGeometryAsync(old, 1);
+            Task<int> opened = viewer.OpenAsync("second");
+            Assert.True(scan.IsCanceled);
+            Assert.True(geometry.IsCanceled);
+            engine.Release.Set();
+            await opened;
+            Assert.Single((await viewer.SearchPageAsync(viewer.BeginSearch(), 0, "a", 10)).Matches);
+            Assert.Equal(2, engine.TextCount);
+            Assert.Equal(1, engine.ClosedDocuments);
+        }
+        finally { engine.Release.Set(); }
+    }
+
+    [Fact]
+    public async Task ScanReusesSelectionCacheAndDoesNotCancelSelection()
+    {
+        FakeEngine engine = new() { BlockText = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        var selection = viewer.ExtractTextAsync(0);
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            long generation = viewer.BeginSearch();
+            var scan = viewer.SearchPageAsync(generation, 0, "a", 10);
+            viewer.CancelSearchGeometry();
+            Assert.False(selection.IsCanceled);
+            engine.Release.Set();
+            var text = await selection;
+            Assert.Single((await scan).Matches);
+            Assert.Same(text, await viewer.SearchGeometryAsync(generation, 0));
+            Assert.Equal(1, engine.TextCount);
+        }
+        finally { engine.Release.Set(); }
+    }
+
+    [Fact]
+    public async Task ThousandPageScanIsReplenishedAndDoesNotKeepEveryTextPageCached()
+    {
+        FakeEngine engine = new() { PageCount = 1001 };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("large");
+        Assert.Equal(0, engine.TextCount);
+        long generation = viewer.BeginSearch();
+        for (int page = 0; page < 1001; page++)
+        {
+            Assert.Empty((await viewer.SearchPageAsync(generation, page, "no match", 10)).Matches);
+            Assert.Equal(page + 1, engine.TextCount);
+        }
+        await viewer.SearchGeometryAsync(generation, 0);
+        Assert.Equal(1002, engine.TextCount); // Page zero was evicted from the bounded shared text cache.
+    }
+
+    [Fact]
+    public async Task SearchCloseDoesNotCancelPendingInteractionOrRaster()
+    {
+        FakeEngine engine = new() { BlockText = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        var scan = viewer.SearchPageAsync(viewer.BeginSearch(), 0, "a", 10);
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            var text = viewer.ExtractTextAsync(1);
+            var raster = viewer.RenderVisible([new(2, new(96, 96))])[0];
+            viewer.CancelSearch();
+            Assert.True(scan.IsCanceled);
+            Assert.False(text.IsCanceled);
+            Assert.False(raster.IsCanceled);
+            engine.Release.Set();
+            await text;
+            using ViewerRenderResult result = await raster;
+        }
+        finally { engine.Release.Set(); }
+    }
+
+    [Fact]
+    public async Task RapidQueryChangesDoNotAccumulateBackgroundNativeWork()
+    {
+        FakeEngine engine = new() { BlockText = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        var previous = viewer.SearchPageAsync(viewer.BeginSearch(), 0, "a", 10);
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            for (int query = 0; query < 1000; query++)
+            {
+                var next = viewer.SearchPageAsync(viewer.BeginSearch(), 1, "b", 10);
+                Assert.True(previous.IsCanceled);
+                previous = next;
+            }
+            engine.Release.Set();
+            Assert.Single((await previous).Matches);
+            Assert.Equal(2, engine.TextCount);
+        }
+        finally { engine.Release.Set(); }
+    }
+
     private sealed class FakeEngine : IPdfRenderer
     {
         public bool BlockText { get; init; }

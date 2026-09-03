@@ -17,6 +17,10 @@ public sealed class PdfTextIntegrationTests
             StringBuilder text = new();
             page.AppendText(text, 0, page.Count);
             Assert.Equal("Aé😀\r\nΩ", text.ToString());
+            var match = Assert.Single(new Core.Search.SearchablePageText(page).Find(0, "😀\r\nω", 10).Matches);
+            StringBuilder found = new();
+            page.AppendText(found, match.Start, match.End);
+            Assert.Equal("😀\r\nΩ", found.ToString());
             Assert.True(page[0].Bounds.HasArea);
             Assert.InRange(page[0].Bounds.Left, 0, 1);
             Assert.InRange(page[0].Bounds.Top, 0, 1);

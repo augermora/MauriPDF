@@ -38,11 +38,13 @@ internal sealed partial class ContinuousPdfView : Control
         Controls.Add(_horizontal);
         _vertical.Scroll += (_, e) =>
         {
+            _searchNavigation = null;
             MoveTo(ScrollOffset(e, _top, MaxTop, ViewHeight), _left);
             e.NewValue = _vertical.Value;
         };
         _horizontal.Scroll += (_, e) =>
         {
+            _searchNavigation = null;
             MoveTo(_top, ScrollOffset(e, _left, MaxLeft, ViewWidth));
             e.NewValue = _horizontal.Value;
         };
@@ -61,6 +63,7 @@ internal sealed partial class ContinuousPdfView : Control
 
     public void SetDocument(IReadOnlyList<PdfPageSize>? sizes)
     {
+        SetSearch(null, 0);
         ClearSelection();
         CancelDemand();
         _resizeTimer.Stop();
@@ -78,13 +81,22 @@ internal sealed partial class ContinuousPdfView : Control
     {
         bool scaleChanged = _state is null || state.ZoomMode != _state.ZoomMode || state.ZoomPercent != _state.ZoomPercent;
         navigate |= _state?.PageIndex != state.PageIndex;
+        if (navigate) _searchNavigation = null;
         _state = state;
         if (scaleChanged || refit) RebuildLayout();
         if (navigate && _layout is not null) MoveTo(_layout.ScrollTarget(state.PageIndex, ViewHeight), _left);
     }
 
-    public void ScrollViewport(int direction) => MoveTo(_top + direction * ViewHeight * 0.9, _left);
-    public void ScrollLine(int direction) => MoveTo(_top + direction * 48, _left);
+    public void ScrollViewport(int direction)
+    {
+        _searchNavigation = null;
+        MoveTo(_top + direction * ViewHeight * 0.9, _left);
+    }
+    public void ScrollLine(int direction)
+    {
+        _searchNavigation = null;
+        MoveTo(_top + direction * 48, _left);
+    }
 
     private void RebuildLayout()
     {
@@ -131,6 +143,7 @@ internal sealed partial class ContinuousPdfView : Control
             }
         }
         CheckDemand();
+        RefreshSearchGeometry();
         if (_draggingText) UpdateDragPoint(PointToClient(Cursor.Position));
         Invalidate();
     }
@@ -221,12 +234,14 @@ internal sealed partial class ContinuousPdfView : Control
             e.Graphics.FillRectangle(Brushes.White, bounds);
             if (_images.TryGetValue(index, out Bitmap? image)) e.Graphics.DrawImage(image, bounds);
             e.Graphics.DrawRectangle(SystemPens.ControlDark, bounds);
-            PaintSelection(e.Graphics, index, bounds);
+            PaintSearch(e.Graphics, index, bounds);
+            PaintSelection(e.Graphics, index, bounds); // Mouse selection is always the top overlay.
         }
     }
 
     protected override void OnMouseWheel(MouseEventArgs e)
     {
+        _searchNavigation = null;
         base.OnMouseWheel(e);
         int lines = SystemInformation.MouseWheelScrollLines;
         double distance = lines < 0 ? ViewHeight * 0.9 : lines * 16;
@@ -257,6 +272,7 @@ internal sealed partial class ContinuousPdfView : Control
         if (disposing && !_disposed)
         {
             _disposed = true;
+            DisposeSearch();
             DisposeSelection();
             CancelDemand();
             _demandTimer.Dispose();

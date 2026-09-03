@@ -1,6 +1,7 @@
 using MauriPDF.Core.Rendering;
 using MauriPDF.Core.Viewing;
 using MauriPDF.Core.Text;
+using MauriPDF.Core.Search;
 
 namespace MauriPDF.Rendering;
 
@@ -20,6 +21,11 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
     private Request? _pendingText;
     private readonly TextPageCache _textCache = new();
     private long _textVersion;
+    private Request? _pendingSearchGeometry;
+    private Request? _pendingSearchScan;
+    private long _searchGeneration;
+    private long _geometryVersion;
+    private long _scanVersion;
     private Request? _active;
     private bool _stopping;
     private long _version;
@@ -89,7 +95,81 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
         _pending?.Cancel();
         _pending = null;
         while (_visiblePages.TryDequeue(out Request? old)) old.Cancel();
-        if (_active?.ThumbnailPage is null && _active?.TextPageIndex is null) _active?.Cancel();
+        if (_active?.ThumbnailPage is null && _active?.TextPageIndex is null && _active?.SearchPageIndex is null) _active?.Cancel();
+    }
+
+    public long BeginSearch()
+    {
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_stopping, this);
+            CancelSearchLocked();
+            return _searchGeneration;
+        }
+    }
+
+    public void CancelSearch()
+    {
+        lock (_gate) { CancelSearchLocked(); }
+    }
+
+    private void CancelSearchLocked()
+    {
+        _searchGeneration++;
+        CancelSearchGeometryLocked();
+        _pendingSearchScan?.Cancel();
+        _pendingSearchScan = null;
+        if (_active?.ScanQuery is not null) _active.Cancel();
+    }
+
+    public void CancelSearchGeometry()
+    {
+        lock (_gate) { CancelSearchGeometryLocked(); }
+    }
+
+    private void CancelSearchGeometryLocked()
+    {
+        _geometryVersion++;
+        _pendingSearchGeometry?.Cancel();
+        _pendingSearchGeometry = null;
+        if (_active?.SearchPageIndex is not null && _active.ScanQuery is null) _active.Cancel();
+    }
+
+    public Task<PdfTextPage> SearchGeometryAsync(long generation, int pageIndex)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(pageIndex);
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_stopping, this);
+            if (generation != _searchGeneration) return Task.FromCanceled<PdfTextPage>(new CancellationToken(true));
+            CancelSearchGeometryLocked();
+            Request request = new() { SearchPageIndex = pageIndex, SearchGeneration = generation,
+                GeometryVersion = _geometryVersion, DocumentGeneration = _documentGeneration };
+            _pendingSearchGeometry = request;
+            Monitor.Pulse(_gate);
+            return request.Text.Task;
+        }
+    }
+
+    /// <summary>One replenished scan slot; the caller awaits this page before requesting the next.</summary>
+    public Task<PageSearchResult> SearchPageAsync(long generation, int pageIndex, string query, int remainingResults)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(pageIndex);
+        ArgumentOutOfRangeException.ThrowIfNegative(remainingResults);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(remainingResults, DocumentSearchState.MaximumResults);
+        if (query.Length > SearchablePageText.MaximumQueryLength) throw new ArgumentOutOfRangeException(nameof(query));
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_stopping, this);
+            if (generation != _searchGeneration) return Task.FromCanceled<PageSearchResult>(new CancellationToken(true));
+            _pendingSearchScan?.Cancel();
+            if (_active?.ScanQuery is not null) _active.Cancel();
+            Request request = new() { SearchPageIndex = pageIndex, ScanQuery = query, ResultLimit = remainingResults,
+                SearchGeneration = generation, ScanVersion = ++_scanVersion, DocumentGeneration = _documentGeneration };
+            _pendingSearchScan = request;
+            Monitor.Pulse(_gate);
+            return request.Scanned.Task;
+        }
     }
 
     /// <summary>One replaceable text slot. Immutable results may safely be shared by duplicate requests.</summary>
@@ -179,6 +259,7 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
         lock (_gate)
         {
             _stopping = true;
+            CancelSearchLocked();
             CancelMainLocked();
             CancelThumbnailsLocked();
             CancelTextLocked();
@@ -201,11 +282,12 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
             if (request.IsOpen)
             {
                 _documentGeneration++;
+                CancelSearchLocked();
                 CancelThumbnailsLocked();
                 CancelTextLocked();
             }
             _pending?.Cancel();
-            if (_active?.ThumbnailPage is null && _active?.TextPageIndex is null) _active?.Cancel();
+            if (_active?.ThumbnailPage is null && _active?.TextPageIndex is null && _active?.SearchPageIndex is null) _active?.Cancel();
             _pending = request;
             Monitor.Pulse(_gate);
         }
@@ -222,7 +304,8 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
                 Request request;
                 lock (_gate)
                 {
-                    while (_pending is null && _visiblePages.Count == 0 && _pendingText is null && _pendingThumbnail is null && !_stopping)
+                    while (_pending is null && _visiblePages.Count == 0 && _pendingText is null
+                        && _pendingSearchGeometry is null && _pendingSearchScan is null && _pendingThumbnail is null && !_stopping)
                     {
                         Monitor.Wait(_gate);
                     }
@@ -233,10 +316,13 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
                     }
 
                     // Explicit page/open requests always precede pending thumbnails.
-                    request = _pending ?? (_visiblePages.Count > 0 ? _visiblePages.Dequeue() : _pendingText ?? _pendingThumbnail!);
+                    request = _pending ?? (_visiblePages.Count > 0 ? _visiblePages.Dequeue()
+                        : _pendingText ?? _pendingSearchGeometry ?? _pendingSearchScan ?? _pendingThumbnail!);
                     if (_pending is not null) _pending = null;
                     else if (request.ThumbnailPage.HasValue) _pendingThumbnail = null;
                     else if (request.TextPageIndex.HasValue) _pendingText = null;
+                    else if (request.ScanQuery is not null) _pendingSearchScan = null;
+                    else if (request.SearchPageIndex.HasValue) _pendingSearchGeometry = null;
                     _active = request;
                 }
 
@@ -276,17 +362,20 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
                             session = null;
                         }
                     }
-                    else if (request.TextPageIndex is int textPageIndex)
+                    else if ((request.TextPageIndex ?? request.SearchPageIndex) is int textPageIndex)
                     {
                         if (session is null) throw new InvalidOperationException("No document is open.");
                         PdfTextPage? text = _textCache.Get(_documentId, textPageIndex);
                         text ??= session.ExtractText(textPageIndex);
+                        PageSearchResult? matches = request.ScanQuery is null ? null
+                            : new SearchablePageText(text).Find(textPageIndex, request.ScanQuery, request.ResultLimit);
                         lock (_gate)
                         {
                             if (IsCurrent(request))
                             {
                                 _textCache.Store(_documentId, textPageIndex, text);
-                                request.Text.TrySetResult(text);
+                                if (matches is not null) request.Scanned.TrySetResult(matches);
+                                else request.Text.TrySetResult(text);
                             }
                         }
                     }
@@ -395,7 +484,10 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
         }
     }
 
-    private bool IsCurrent(Request request) => !_stopping && (request.TextPageIndex.HasValue
+    private bool IsCurrent(Request request) => !_stopping && (request.SearchPageIndex.HasValue
+        ? request.SearchGeneration == _searchGeneration && request.DocumentGeneration == _documentGeneration
+            && (request.ScanQuery is null ? request.GeometryVersion == _geometryVersion : request.ScanVersion == _scanVersion)
+        : request.TextPageIndex.HasValue
         ? request.TextVersion == _textVersion && request.DocumentGeneration == _documentGeneration
         : request.ThumbnailPage.HasValue
         ? request.ThumbnailVersion == _thumbnailVersion && request.DocumentGeneration == _documentGeneration
@@ -406,29 +498,38 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
         public long Version { get; set; }
         public int? ThumbnailPage { get; init; }
         public int? TextPageIndex { get; init; }
+        public int? SearchPageIndex { get; init; }
+        public string? ScanQuery { get; init; }
+        public int ResultLimit { get; init; }
+        public long SearchGeneration { get; init; }
+        public long GeometryVersion { get; init; }
+        public long ScanVersion { get; init; }
         public long TextVersion { get; init; }
         public long ThumbnailVersion { get; init; }
         public long DocumentGeneration { get; init; }
         public string? Path { get; init; }
         public ViewerState? State { get; init; }
         public PageRenderTarget? Target { get; init; }
-        public bool IsOpen => State is null && Target is null && ThumbnailPage is null && TextPageIndex is null;
+        public bool IsOpen => State is null && Target is null && ThumbnailPage is null && TextPageIndex is null && SearchPageIndex is null;
         public int Width { get; init; }
         public int Height { get; init; }
         public int ScrollbarWidth { get; init; }
         public TaskCompletionSource<IReadOnlyList<PdfPageSize>> Opened { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<ViewerRenderResult> Rendered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<PdfTextPage> Text { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<PageSearchResult> Scanned { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public void Cancel()
         {
             if (IsOpen) Opened.TrySetCanceled();
-            else if (TextPageIndex.HasValue) Text.TrySetCanceled();
+            else if (ScanQuery is not null) Scanned.TrySetCanceled();
+            else if (TextPageIndex.HasValue || SearchPageIndex.HasValue) Text.TrySetCanceled();
             else Rendered.TrySetCanceled();
         }
         public void Fail(Exception exception)
         {
             if (IsOpen) Opened.TrySetException(exception);
-            else if (TextPageIndex.HasValue) Text.TrySetException(exception);
+            else if (ScanQuery is not null) Scanned.TrySetException(exception);
+            else if (TextPageIndex.HasValue || SearchPageIndex.HasValue) Text.TrySetException(exception);
             else Rendered.TrySetException(exception);
         }
     }

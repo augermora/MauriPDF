@@ -26,6 +26,7 @@ internal sealed class MainForm : Form
     private readonly ToolStripButton _fitPage = new("Fit Page");
     private readonly ToolStripButton _fitWidth = new("Fit Width");
     private readonly ContinuousPdfView _viewport;
+    private readonly DocumentSearchBar _searchBar;
     private ViewerState? _state;
     private long _requestId;
     private bool _resourcesDisposed;
@@ -36,6 +37,7 @@ internal sealed class MainForm : Form
     {
         _renderer = renderer;
         _viewport = new ContinuousPdfView(renderer);
+        _searchBar = new DocumentSearchBar(renderer, _viewport);
         _viewport.RenderFailed += ShowError;
         _viewport.SelectionStatusChanged += message => _loading.Text = message;
         _viewport.CurrentPageChanged += index =>
@@ -69,12 +71,16 @@ internal sealed class MainForm : Form
         _split.Panel1.Controls.Add(_thumbnails);
         _split.Panel2.Controls.Add(_viewport);
         Controls.Add(_split);
+        Controls.Add(_searchBar);
         Controls.Add(toolbar);
         UpdateToolbar();
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        if (keyData == (Keys.Control | Keys.F)) { _searchBar.OpenSearch(); return true; }
+        if (keyData is Keys.F3 or (Keys.Shift | Keys.F3)) { _searchBar.Navigate(keyData.HasFlag(Keys.Shift)); return true; }
+        if (keyData == Keys.Escape && _searchBar.Visible) { _searchBar.CloseSearch(); return true; }
         if (keyData == Keys.F4)
         {
             ToggleThumbnails();
@@ -85,6 +91,8 @@ internal sealed class MainForm : Form
             ChooseDocument();
             return true;
         }
+
+        if (_searchBar.QueryFocused) return base.ProcessCmdKey(ref msg, keyData);
 
         // Preserve normal cursor movement and Home/End while editing the page number.
         if (keyData == (Keys.Control | Keys.C) && !_pageNumber.Focused)
@@ -143,6 +151,7 @@ internal sealed class MainForm : Form
         e.Cancel = true;
         if (_closing) return;
         _closing = true;
+        _searchBar.SetDocument(0);
         _thumbnails.SetActive(false);
         _viewport.SetDocument(null);
         ++_requestId;
@@ -192,6 +201,7 @@ internal sealed class MainForm : Form
             Text = $"MauriPDF — {Path.GetFileName(dialog.FileName)}";
             _loading.Text = string.Empty;
             _state = new ViewerState(pages.Count);
+            _searchBar.SetDocument(pages.Count);
             _viewport.SetDocument(pages);
             _thumbnails.SetDocument(pages.Count);
             UpdateToolbar();
@@ -257,6 +267,7 @@ internal sealed class MainForm : Form
 
     private void CloseDocument()
     {
+        _searchBar.SetDocument(0);
         _thumbnails.SetDocument(0);
         ++_requestId;
         _viewport.SetDocument(null);
