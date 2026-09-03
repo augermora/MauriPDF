@@ -2,6 +2,7 @@ using MauriPDF.Core.Rendering;
 using MauriPDF.Core.Viewing;
 using MauriPDF.Core.Text;
 using MauriPDF.Core.Search;
+using MauriPDF.Core.Outline;
 
 namespace MauriPDF.Rendering;
 
@@ -19,6 +20,8 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
     public const int MaximumVisiblePages = 32;
     private Request? _pendingThumbnail;
     private Request? _pendingText;
+    private Request? _pendingOutline;
+    private long _outlineVersion;
     private readonly TextPageCache _textCache = new();
     private long _textVersion;
     private Request? _pendingSearchGeometry;
@@ -95,7 +98,35 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
         _pending?.Cancel();
         _pending = null;
         while (_visiblePages.TryDequeue(out Request? old)) old.Cancel();
-        if (_active?.ThumbnailPage is null && _active?.TextPageIndex is null && _active?.SearchPageIndex is null) _active?.Cancel();
+        if (_active?.ThumbnailPage is null && _active?.TextPageIndex is null && _active?.SearchPageIndex is null && _active?.IsOutline != true) _active?.Cancel();
+    }
+
+    /// <summary>One replaceable metadata slot, below visible rasters and interactive text work.</summary>
+    public Task<PdfOutline> ExtractOutlineAsync()
+    {
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_stopping, this);
+            if (_active?.IsOutline == true && IsCurrent(_active)) return _active.Outline.Task;
+            if (_pendingOutline is not null) return _pendingOutline.Outline.Task;
+            Request request = new() { IsOutline = true, OutlineVersion = _outlineVersion, DocumentGeneration = _documentGeneration };
+            _pendingOutline = request;
+            Monitor.Pulse(_gate);
+            return request.Outline.Task;
+        }
+    }
+
+    public void CancelOutline()
+    {
+        lock (_gate) { CancelOutlineLocked(); }
+    }
+
+    private void CancelOutlineLocked()
+    {
+        _outlineVersion++;
+        _pendingOutline?.Cancel();
+        _pendingOutline = null;
+        if (_active?.IsOutline == true) _active.Cancel();
     }
 
     public long BeginSearch()
@@ -259,6 +290,7 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
         lock (_gate)
         {
             _stopping = true;
+            CancelOutlineLocked();
             CancelSearchLocked();
             CancelMainLocked();
             CancelThumbnailsLocked();
@@ -282,12 +314,13 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
             if (request.IsOpen)
             {
                 _documentGeneration++;
+                CancelOutlineLocked();
                 CancelSearchLocked();
                 CancelThumbnailsLocked();
                 CancelTextLocked();
             }
             _pending?.Cancel();
-            if (_active?.ThumbnailPage is null && _active?.TextPageIndex is null && _active?.SearchPageIndex is null) _active?.Cancel();
+            if (_active?.ThumbnailPage is null && _active?.TextPageIndex is null && _active?.SearchPageIndex is null && _active?.IsOutline != true) _active?.Cancel();
             _pending = request;
             Monitor.Pulse(_gate);
         }
@@ -305,7 +338,7 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
                 lock (_gate)
                 {
                     while (_pending is null && _visiblePages.Count == 0 && _pendingText is null
-                        && _pendingSearchGeometry is null && _pendingSearchScan is null && _pendingThumbnail is null && !_stopping)
+                        && _pendingSearchGeometry is null && _pendingOutline is null && _pendingSearchScan is null && _pendingThumbnail is null && !_stopping)
                     {
                         Monitor.Wait(_gate);
                     }
@@ -317,12 +350,13 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
 
                     // Explicit page/open requests always precede pending thumbnails.
                     request = _pending ?? (_visiblePages.Count > 0 ? _visiblePages.Dequeue()
-                        : _pendingText ?? _pendingSearchGeometry ?? _pendingSearchScan ?? _pendingThumbnail!);
+                        : _pendingText ?? _pendingSearchGeometry ?? _pendingOutline ?? _pendingSearchScan ?? _pendingThumbnail!);
                     if (_pending is not null) _pending = null;
                     else if (request.ThumbnailPage.HasValue) _pendingThumbnail = null;
                     else if (request.TextPageIndex.HasValue) _pendingText = null;
                     else if (request.ScanQuery is not null) _pendingSearchScan = null;
                     else if (request.SearchPageIndex.HasValue) _pendingSearchGeometry = null;
+                    else if (request.IsOutline) _pendingOutline = null;
                     _active = request;
                 }
 
@@ -360,6 +394,15 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
                             // Never hold the submission gate during native disposal.
                             session.Dispose();
                             session = null;
+                        }
+                    }
+                    else if (request.IsOutline)
+                    {
+                        if (session is null) throw new InvalidOperationException("No document is open.");
+                        PdfOutline outline = session.ExtractOutline();
+                        lock (_gate)
+                        {
+                            if (IsCurrent(request)) request.Outline.TrySetResult(outline);
                         }
                     }
                     else if ((request.TextPageIndex ?? request.SearchPageIndex) is int textPageIndex)
@@ -484,7 +527,9 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
         }
     }
 
-    private bool IsCurrent(Request request) => !_stopping && (request.SearchPageIndex.HasValue
+    private bool IsCurrent(Request request) => !_stopping && (request.IsOutline
+        ? request.OutlineVersion == _outlineVersion && request.DocumentGeneration == _documentGeneration
+        : request.SearchPageIndex.HasValue
         ? request.SearchGeneration == _searchGeneration && request.DocumentGeneration == _documentGeneration
             && (request.ScanQuery is null ? request.GeometryVersion == _geometryVersion : request.ScanVersion == _scanVersion)
         : request.TextPageIndex.HasValue
@@ -496,6 +541,8 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
     private sealed class Request
     {
         public long Version { get; set; }
+        public bool IsOutline { get; init; }
+        public long OutlineVersion { get; init; }
         public int? ThumbnailPage { get; init; }
         public int? TextPageIndex { get; init; }
         public int? SearchPageIndex { get; init; }
@@ -510,7 +557,7 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
         public string? Path { get; init; }
         public ViewerState? State { get; init; }
         public PageRenderTarget? Target { get; init; }
-        public bool IsOpen => State is null && Target is null && ThumbnailPage is null && TextPageIndex is null && SearchPageIndex is null;
+        public bool IsOpen => !IsOutline && State is null && Target is null && ThumbnailPage is null && TextPageIndex is null && SearchPageIndex is null;
         public int Width { get; init; }
         public int Height { get; init; }
         public int ScrollbarWidth { get; init; }
@@ -518,9 +565,11 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
         public TaskCompletionSource<ViewerRenderResult> Rendered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<PdfTextPage> Text { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<PageSearchResult> Scanned { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<PdfOutline> Outline { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public void Cancel()
         {
             if (IsOpen) Opened.TrySetCanceled();
+            else if (IsOutline) Outline.TrySetCanceled();
             else if (ScanQuery is not null) Scanned.TrySetCanceled();
             else if (TextPageIndex.HasValue || SearchPageIndex.HasValue) Text.TrySetCanceled();
             else Rendered.TrySetCanceled();
@@ -528,6 +577,7 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
         public void Fail(Exception exception)
         {
             if (IsOpen) Opened.TrySetException(exception);
+            else if (IsOutline) Outline.TrySetException(exception);
             else if (ScanQuery is not null) Scanned.TrySetException(exception);
             else if (TextPageIndex.HasValue || SearchPageIndex.HasValue) Text.TrySetException(exception);
             else Rendered.TrySetException(exception);

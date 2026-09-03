@@ -628,8 +628,106 @@ public sealed class PdfViewerRendererTests
         finally { engine.Release.Set(); }
     }
 
+    [Fact]
+    public async Task OutlineUsesLowerPriorityThanVisibleAndInteractiveWork()
+    {
+        FakeEngine engine = new() { BlockFirst = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        Assert.Equal(0, engine.OutlineCount);
+        var old = viewer.RenderVisible([new(0, new(96, 96))])[0];
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            var outline = viewer.ExtractOutlineAsync();
+            Assert.Same(outline, viewer.ExtractOutlineAsync());
+            var text = viewer.ExtractTextAsync(1);
+            var visible = viewer.RenderVisible([new(2, new(96, 96))])[0];
+            Assert.True(old.IsCanceled);
+            Assert.False(outline.IsCanceled);
+            engine.Release.Set();
+            using ViewerRenderResult rendered = await visible;
+            await text;
+            Assert.Equal("Bookmark", Assert.Single((await outline).Roots).Title);
+            Assert.Equal(["R0", "R2", "T1", "O"], engine.WorkOrder);
+        }
+        finally { engine.Release.Set(); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task DocumentReplacementRejectsActiveAndPendingOutlines(bool includePending)
+    {
+        FakeEngine engine = new() { BlockOutline = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        var active = viewer.ExtractOutlineAsync();
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            viewer.CancelVisible();
+            viewer.CancelText();
+            viewer.CancelSearch();
+            viewer.CancelThumbnails();
+            Assert.False(active.IsCanceled);
+            Task<Core.Outline.PdfOutline>? pending = null;
+            if (includePending)
+            {
+                viewer.CancelOutline();
+                pending = viewer.ExtractOutlineAsync();
+            }
+            Task<int> opened = viewer.OpenAsync("second");
+            Assert.True(active.IsCanceled);
+            if (pending is not null) Assert.True(pending.IsCanceled);
+            Assert.Equal(0, engine.ClosedDocuments);
+            engine.Release.Set();
+            await opened;
+            Assert.Single((await viewer.ExtractOutlineAsync()).Roots);
+            Assert.Equal(2, engine.OutlineCount);
+            Assert.Equal(1, engine.ClosedDocuments);
+        }
+        finally { engine.Release.Set(); }
+    }
+
+    [Fact]
+    public async Task OutlineFailureDoesNotCloseDocumentOrPreventRendering()
+    {
+        FakeEngine engine = new() { FailOutline = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        await Assert.ThrowsAsync<InvalidDataException>(() => viewer.ExtractOutlineAsync());
+        Assert.Equal(0, engine.ClosedDocuments);
+        using ViewerRenderResult rendered = await viewer.RenderVisible([new(0, new(96, 96))])[0];
+        Assert.Equal(1, engine.RenderCount);
+    }
+
+    [Fact]
+    public async Task ShutdownWaitsForOutlineBeforeReleasingDocument()
+    {
+        FakeEngine engine = new() { BlockOutline = true };
+        PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        var outline = viewer.ExtractOutlineAsync();
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Task shutdown = viewer.DisposeAsync().AsTask();
+            Assert.True(outline.IsCanceled);
+            Assert.False(shutdown.IsCompleted);
+            Assert.Equal(0, engine.ClosedDocuments);
+            engine.Release.Set();
+            await shutdown;
+            Assert.Equal(1, engine.ClosedDocuments);
+        }
+        finally { engine.Release.Set(); await viewer.DisposeAsync(); }
+    }
+
     private sealed class FakeEngine : IPdfRenderer
     {
+        public bool BlockOutline { get; init; }
+        public bool FailOutline { get; init; }
+        public int OutlineCount { get; set; }
         public bool BlockText { get; init; }
         public bool FailText { get; init; }
         public int TextCount { get; set; }
@@ -654,6 +752,18 @@ public sealed class PdfViewerRendererTests
 
         private sealed class Session(FakeEngine engine) : IPdfRenderSession
         {
+            public Core.Outline.PdfOutline ExtractOutline()
+            {
+                engine.OutlineCount++;
+                engine.WorkOrder.Add("O");
+                if (engine.BlockOutline)
+                {
+                    engine.Started.TrySetResult();
+                    engine.Release.Wait();
+                }
+                if (engine.FailOutline) throw new InvalidDataException("Test outline failure.");
+                return new([new("Bookmark", 0, [])]);
+            }
             public Core.Text.PdfTextPage ExtractText(int pageIndex)
             {
                 engine.TextCount++;

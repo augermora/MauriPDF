@@ -22,6 +22,8 @@ internal sealed class PdfiumRenderSession : IPdfRenderSession
 
     public int PageCount { get; }
 
+    public Core.Outline.PdfOutline ExtractOutline() => new PdfiumOutlineReader(GetDocument(), PageCount).Read();
+
     public PdfTextPage ExtractText(int pageIndex)
     {
         FpdfDocumentT document = GetDocument();

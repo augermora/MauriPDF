@@ -8,12 +8,14 @@ internal sealed class MainForm : Form
 {
     private readonly PdfViewerRenderer _renderer;
     private readonly ThumbnailListView _thumbnails;
+    private readonly OutlineView _outline = new();
+    private readonly TabControl _navigationTabs = new() { Dock = DockStyle.Fill };
     private readonly SplitContainer _split = new()
     {
         Dock = DockStyle.Fill, Size = new Size(850, 550), Panel1MinSize = 170,
         Panel2MinSize = 200, SplitterDistance = 190
     };
-    private readonly ToolStripButton _toggleThumbnails = new("Thumbnails") { Checked = true, ToolTipText = "Show/hide thumbnails (F4)" };
+    private readonly ToolStripButton _toggleThumbnails = new("Sidebar") { Checked = true, ToolTipText = "Show/hide navigation sidebar (F4)" };
     private readonly ToolStripLabel _loading = new();
     private readonly ToolStripButton _previous = new("<") { ToolTipText = "Previous page" };
     private readonly ToolStripButton _next = new(">") { ToolTipText = "Next page" };
@@ -47,6 +49,11 @@ internal sealed class MainForm : Form
         };
         _thumbnails = new ThumbnailListView(renderer);
         _thumbnails.PageRequested += index => ChangeState(_state?.GoToPage(index + 1), navigate: true);
+        _outline.PageRequested += index =>
+        {
+            if (_state is not null && index < _state.PageCount)
+                ChangeState(_state.GoToPage(index + 1), navigate: true, focusViewport: false);
+        };
         _toggleThumbnails.Click += (_, _) => ToggleThumbnails();
         Text = "MauriPDF";
         StartPosition = FormStartPosition.CenterScreen;
@@ -68,7 +75,13 @@ internal sealed class MainForm : Form
             open, _toggleThumbnails, new ToolStripSeparator(), _previous, _pageNumber, _totalPages, _next,
             new ToolStripSeparator(), _zoomOut, _resetZoom, _zoomIn, _zoomLabel, _fitPage, _fitWidth, _loading
         ]);
-        _split.Panel1.Controls.Add(_thumbnails);
+        TabPage thumbnailsTab = new("Thumbnails");
+        thumbnailsTab.Controls.Add(_thumbnails);
+        TabPage outlineTab = new("Outline");
+        outlineTab.Controls.Add(_outline);
+        _navigationTabs.TabPages.AddRange([thumbnailsTab, outlineTab]);
+        _navigationTabs.SelectedIndexChanged += (_, _) => UpdateSidebarActivity();
+        _split.Panel1.Controls.Add(_navigationTabs);
         _split.Panel2.Controls.Add(_viewport);
         Controls.Add(_split);
         Controls.Add(_searchBar);
@@ -105,6 +118,10 @@ internal sealed class MainForm : Form
         {
             return base.ProcessCmdKey(ref msg, keyData);
         }
+
+        // TreeView owns its ordinary navigation/expand/collapse/activation keys.
+        if (_outline.ContainsFocus && (keyData & Keys.Control) == 0)
+            return base.ProcessCmdKey(ref msg, keyData);
 
         if (!_thumbnails.ContainsFocus && keyData is Keys.PageUp or Keys.PageDown or Keys.Up or Keys.Down)
         {
@@ -151,6 +168,8 @@ internal sealed class MainForm : Form
         e.Cancel = true;
         if (_closing) return;
         _closing = true;
+        _outline.Clear();
+        _renderer.CancelOutline();
         _searchBar.SetDocument(0);
         _thumbnails.SetActive(false);
         _viewport.SetDocument(null);
@@ -205,6 +224,7 @@ internal sealed class MainForm : Form
             _viewport.SetDocument(pages);
             _thumbnails.SetDocument(pages.Count);
             UpdateToolbar();
+            await LoadOutlineAsync(requestId);
         }
         catch (OperationCanceledException)
         {
@@ -240,13 +260,29 @@ internal sealed class MainForm : Form
         _viewport.Focus();
     }
 
-    private void ChangeState(ViewerState? requested, bool navigate = false, bool refit = false)
+    private async Task LoadOutlineAsync(long requestId)
+    {
+        _outline.Clear("Loading bookmarks...");
+        try
+        {
+            var outline = await _renderer.ExtractOutlineAsync();
+            if (!_resourcesDisposed && !_closing && requestId == _requestId) _outline.SetOutline(outline);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception)
+        {
+            // Optional metadata failure must never turn an otherwise readable PDF into an open error.
+            if (!_resourcesDisposed && !_closing && requestId == _requestId) _outline.Clear("Bookmarks unavailable");
+        }
+    }
+
+    private void ChangeState(ViewerState? requested, bool navigate = false, bool refit = false, bool focusViewport = true)
     {
         if (requested is null || _resourcesDisposed || _closing) return;
         _state = requested;
         _viewport.ApplyState(requested, navigate, refit);
         UpdateToolbar();
-        _viewport.Focus();
+        if (focusViewport) _viewport.Focus();
     }
 
     private void UpdateToolbar()
@@ -267,6 +303,8 @@ internal sealed class MainForm : Form
 
     private void CloseDocument()
     {
+        _outline.Clear();
+        _renderer.CancelOutline();
         _searchBar.SetDocument(0);
         _thumbnails.SetDocument(0);
         ++_requestId;
@@ -288,6 +326,8 @@ internal sealed class MainForm : Form
         if (_closing) return;
         _split.Panel1Collapsed = !_split.Panel1Collapsed;
         _toggleThumbnails.Checked = !_split.Panel1Collapsed;
-        _thumbnails.SetActive(!_split.Panel1Collapsed);
+        UpdateSidebarActivity();
     }
+
+    private void UpdateSidebarActivity() => _thumbnails.SetActive(!_split.Panel1Collapsed && _navigationTabs.SelectedIndex == 0);
 }

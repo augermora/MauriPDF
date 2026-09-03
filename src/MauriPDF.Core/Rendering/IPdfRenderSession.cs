@@ -12,4 +12,7 @@ public interface IPdfRenderSession : IDisposable
 
     /// <summary>Extracts immutable text-layer data. The implementation closes all temporary native handles before return.</summary>
     Text.PdfTextPage ExtractText(int pageIndex);
+
+    /// <summary>Copies a bounded outline snapshot while the document is alive. No native ownership escapes.</summary>
+    Outline.PdfOutline ExtractOutline();
 }
