@@ -7,6 +7,13 @@ namespace MauriPDF.App;
 internal sealed class MainForm : Form
 {
     private readonly PdfViewerRenderer _renderer;
+    private readonly ThumbnailListView _thumbnails;
+    private readonly SplitContainer _split = new()
+    {
+        Dock = DockStyle.Fill, Size = new Size(850, 550), Panel1MinSize = 170,
+        Panel2MinSize = 200, SplitterDistance = 190
+    };
+    private readonly ToolStripButton _toggleThumbnails = new("Thumbnails") { Checked = true, ToolTipText = "Show/hide thumbnails (F4)" };
     private readonly ToolStripLabel _loading = new();
     private readonly ToolStripButton _previous = new("<") { ToolTipText = "Previous page" };
     private readonly ToolStripButton _next = new(">") { ToolTipText = "Next page" };
@@ -35,6 +42,9 @@ internal sealed class MainForm : Form
     public MainForm(PdfViewerRenderer renderer)
     {
         _renderer = renderer;
+        _thumbnails = new ThumbnailListView(renderer);
+        _thumbnails.PageRequested += index => ChangeState(_state?.GoToPage(index + 1));
+        _toggleThumbnails.Click += (_, _) => ToggleThumbnails();
         Text = "MauriPDF";
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(850, 600);
@@ -61,17 +71,24 @@ internal sealed class MainForm : Form
 
         ToolStrip toolbar = new() { GripStyle = ToolStripGripStyle.Hidden };
         toolbar.Items.AddRange([
-            open, new ToolStripSeparator(), _previous, _pageNumber, _totalPages, _next,
+            open, _toggleThumbnails, new ToolStripSeparator(), _previous, _pageNumber, _totalPages, _next,
             new ToolStripSeparator(), _zoomOut, _resetZoom, _zoomIn, _zoomLabel, _fitPage, _fitWidth, _loading
         ]);
         _viewport.Controls.Add(_pageView);
-        Controls.Add(_viewport);
+        _split.Panel1.Controls.Add(_thumbnails);
+        _split.Panel2.Controls.Add(_viewport);
+        Controls.Add(_split);
         Controls.Add(toolbar);
         UpdateToolbar();
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        if (keyData == Keys.F4)
+        {
+            ToggleThumbnails();
+            return true;
+        }
         if (keyData == (Keys.Control | Keys.O))
         {
             ChooseDocument();
@@ -124,6 +141,7 @@ internal sealed class MainForm : Form
         e.Cancel = true;
         if (_closing) return;
         _closing = true;
+        _thumbnails.SetActive(false);
         ++_requestId;
         _resizeTimer.Stop();
         _loading.Text = "Closing...";
@@ -170,6 +188,7 @@ internal sealed class MainForm : Form
             }
 
             Text = $"MauriPDF — {Path.GetFileName(dialog.FileName)}";
+            _thumbnails.SetDocument(pageCount);
             ChangeState(new ViewerState(pageCount));
         }
         catch (OperationCanceledException)
@@ -292,6 +311,7 @@ internal sealed class MainForm : Form
 
     private void UpdateToolbar()
     {
+        if (_state is not null) _thumbnails.SetCurrentPage(_state.PageIndex);
         _previous.Enabled = _state?.CanGoPrevious == true;
         _next.Enabled = _state?.CanGoNext == true;
         _pageNumber.Enabled = _state is not null;
@@ -307,6 +327,7 @@ internal sealed class MainForm : Form
 
     private void CloseDocument(bool keepImage = false)
     {
+        _thumbnails.SetDocument(0);
         ++_requestId;
         _resizeTimer.Stop();
         if (!keepImage)
@@ -328,5 +349,14 @@ internal sealed class MainForm : Form
     {
         MessageBox.Show(this, $"MauriPDF could not open or render this page.\n\n{exception.Message}",
             "MauriPDF", MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
+
+    private void ToggleThumbnails()
+    {
+        if (_closing) return;
+        _split.Panel1Collapsed = !_split.Panel1Collapsed;
+        _toggleThumbnails.Checked = !_split.Panel1Collapsed;
+        _thumbnails.SetActive(!_split.Panel1Collapsed);
+        ScheduleFitRender();
     }
 }
