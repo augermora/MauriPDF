@@ -37,6 +37,7 @@ internal sealed class MainForm : Form
         _renderer = renderer;
         _viewport = new ContinuousPdfView(renderer);
         _viewport.RenderFailed += ShowError;
+        _viewport.SelectionStatusChanged += message => _loading.Text = message;
         _viewport.CurrentPageChanged += index =>
         {
             _state = _state?.GoToPage(index + 1);
@@ -86,6 +87,12 @@ internal sealed class MainForm : Form
         }
 
         // Preserve normal cursor movement and Home/End while editing the page number.
+        if (keyData == (Keys.Control | Keys.C) && !_pageNumber.Focused)
+        {
+            _viewport.CopySelection();
+            return true;
+        }
+
         if (_pageNumber.Focused && (keyData & Keys.Control) == 0)
         {
             return base.ProcessCmdKey(ref msg, keyData);

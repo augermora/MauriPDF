@@ -5,7 +5,7 @@ using MauriPDF.Rendering;
 namespace MauriPDF.App;
 
 /// <summary>One painted surface, two native scrollbars, and a bounded set of exclusively owned Bitmaps.</summary>
-internal sealed class ContinuousPdfView : Control
+internal sealed partial class ContinuousPdfView : Control
 {
     private const int ScrollSteps = 1_000_000;
     private readonly PdfViewerRenderer _renderer;
@@ -48,6 +48,7 @@ internal sealed class ContinuousPdfView : Control
         };
         _demandTimer.Tick += (_, _) => { _demandTimer.Stop(); LoadVisible(); };
         _resizeTimer.Tick += (_, _) => { _resizeTimer.Stop(); RebuildLayout(); };
+        InitializeSelection();
         _ready = true;
     }
 
@@ -60,6 +61,7 @@ internal sealed class ContinuousPdfView : Control
 
     public void SetDocument(IReadOnlyList<PdfPageSize>? sizes)
     {
+        ClearSelection();
         CancelDemand();
         _resizeTimer.Stop();
         ClearImages();
@@ -129,6 +131,7 @@ internal sealed class ContinuousPdfView : Control
             }
         }
         CheckDemand();
+        if (_draggingText) UpdateDragPoint(PointToClient(Cursor.Position));
         Invalidate();
     }
 
@@ -218,10 +221,10 @@ internal sealed class ContinuousPdfView : Control
             e.Graphics.FillRectangle(Brushes.White, bounds);
             if (_images.TryGetValue(index, out Bitmap? image)) e.Graphics.DrawImage(image, bounds);
             e.Graphics.DrawRectangle(SystemPens.ControlDark, bounds);
+            PaintSelection(e.Graphics, index, bounds);
         }
     }
 
-    protected override void OnMouseDown(MouseEventArgs e) { Focus(); base.OnMouseDown(e); }
     protected override void OnMouseWheel(MouseEventArgs e)
     {
         base.OnMouseWheel(e);
@@ -254,6 +257,7 @@ internal sealed class ContinuousPdfView : Control
         if (disposing && !_disposed)
         {
             _disposed = true;
+            DisposeSelection();
             CancelDemand();
             _demandTimer.Dispose();
             _resizeTimer.Dispose();

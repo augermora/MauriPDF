@@ -1,9 +1,10 @@
 using MauriPDF.Core.Rendering;
 using MauriPDF.Core.Viewing;
+using MauriPDF.Core.Text;
 
 namespace MauriPDF.Rendering;
 
-/// <summary>Exclusive engine/session owner: one active operation, a replaceable bounded foreground batch, and one thumbnail slot.</summary>
+/// <summary>Exclusive engine/session owner: one active operation, a bounded foreground batch, and replaceable text/thumbnail slots.</summary>
 public sealed class PdfViewerRenderer : IAsyncDisposable
 {
     private readonly object _gate = new();
@@ -16,6 +17,9 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
     private readonly Queue<Request> _visiblePages = new();
     public const int MaximumVisiblePages = 32;
     private Request? _pendingThumbnail;
+    private Request? _pendingText;
+    private readonly TextPageCache _textCache = new();
+    private long _textVersion;
     private Request? _active;
     private bool _stopping;
     private long _version;
@@ -85,7 +89,37 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
         _pending?.Cancel();
         _pending = null;
         while (_visiblePages.TryDequeue(out Request? old)) old.Cancel();
-        if (_active?.ThumbnailPage is null) _active?.Cancel();
+        if (_active?.ThumbnailPage is null && _active?.TextPageIndex is null) _active?.Cancel();
+    }
+
+    /// <summary>One replaceable text slot. Immutable results may safely be shared by duplicate requests.</summary>
+    public Task<PdfTextPage> ExtractTextAsync(int pageIndex)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(pageIndex);
+        lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_stopping, this);
+            if (_active?.TextPageIndex == pageIndex && IsCurrent(_active)) return _active.Text.Task;
+            if (_pendingText?.TextPageIndex == pageIndex) return _pendingText.Text.Task;
+            CancelTextLocked();
+            Request request = new() { TextPageIndex = pageIndex, TextVersion = _textVersion, DocumentGeneration = _documentGeneration };
+            _pendingText = request;
+            Monitor.Pulse(_gate);
+            return request.Text.Task;
+        }
+    }
+
+    public void CancelText()
+    {
+        lock (_gate) { CancelTextLocked(); }
+    }
+
+    private void CancelTextLocked()
+    {
+        _textVersion++;
+        _pendingText?.Cancel();
+        _pendingText = null;
+        if (_active?.TextPageIndex is not null) _active.Cancel();
     }
 
     public Task<ViewerRenderResult> RenderAsync(ViewerState state, int width, int height, int scrollbarWidth)
@@ -147,6 +181,7 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
             _stopping = true;
             CancelMainLocked();
             CancelThumbnailsLocked();
+            CancelTextLocked();
             _pending?.Cancel();
             _active?.Cancel();
             _pending = null;
@@ -163,13 +198,14 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
             ObjectDisposedException.ThrowIf(_stopping, this);
             CancelMainLocked();
             request.Version = _version;
-            if (request.State is null)
+            if (request.IsOpen)
             {
                 _documentGeneration++;
                 CancelThumbnailsLocked();
+                CancelTextLocked();
             }
             _pending?.Cancel();
-            if (_active?.ThumbnailPage is null) _active?.Cancel();
+            if (_active?.ThumbnailPage is null && _active?.TextPageIndex is null) _active?.Cancel();
             _pending = request;
             Monitor.Pulse(_gate);
         }
@@ -186,7 +222,7 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
                 Request request;
                 lock (_gate)
                 {
-                    while (_pending is null && _visiblePages.Count == 0 && _pendingThumbnail is null && !_stopping)
+                    while (_pending is null && _visiblePages.Count == 0 && _pendingText is null && _pendingThumbnail is null && !_stopping)
                     {
                         Monitor.Wait(_gate);
                     }
@@ -197,9 +233,10 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
                     }
 
                     // Explicit page/open requests always precede pending thumbnails.
-                    request = _pending ?? (_visiblePages.Count > 0 ? _visiblePages.Dequeue() : _pendingThumbnail!);
+                    request = _pending ?? (_visiblePages.Count > 0 ? _visiblePages.Dequeue() : _pendingText ?? _pendingThumbnail!);
                     if (_pending is not null) _pending = null;
                     else if (request.ThumbnailPage.HasValue) _pendingThumbnail = null;
+                    else if (request.TextPageIndex.HasValue) _pendingText = null;
                     _active = request;
                 }
 
@@ -211,6 +248,7 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
                     {
                         _cache.Clear();
                         _thumbnailCache.Clear();
+                        _textCache.Clear();
                         session?.Dispose();
                         session = null;
                         _documentId++;
@@ -236,6 +274,20 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
                             // Never hold the submission gate during native disposal.
                             session.Dispose();
                             session = null;
+                        }
+                    }
+                    else if (request.TextPageIndex is int textPageIndex)
+                    {
+                        if (session is null) throw new InvalidOperationException("No document is open.");
+                        PdfTextPage? text = _textCache.Get(_documentId, textPageIndex);
+                        text ??= session.ExtractText(textPageIndex);
+                        lock (_gate)
+                        {
+                            if (IsCurrent(request))
+                            {
+                                _textCache.Store(_documentId, textPageIndex, text);
+                                request.Text.TrySetResult(text);
+                            }
                         }
                     }
                     else
@@ -331,6 +383,7 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
         {
             _cache.Dispose();
             _thumbnailCache.Dispose();
+            _textCache.Clear();
             try
             {
                 session?.Dispose();
@@ -342,7 +395,9 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
         }
     }
 
-    private bool IsCurrent(Request request) => !_stopping && (request.ThumbnailPage.HasValue
+    private bool IsCurrent(Request request) => !_stopping && (request.TextPageIndex.HasValue
+        ? request.TextVersion == _textVersion && request.DocumentGeneration == _documentGeneration
+        : request.ThumbnailPage.HasValue
         ? request.ThumbnailVersion == _thumbnailVersion && request.DocumentGeneration == _documentGeneration
         : request.Version == _version);
 
@@ -350,25 +405,30 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
     {
         public long Version { get; set; }
         public int? ThumbnailPage { get; init; }
+        public int? TextPageIndex { get; init; }
+        public long TextVersion { get; init; }
         public long ThumbnailVersion { get; init; }
         public long DocumentGeneration { get; init; }
         public string? Path { get; init; }
         public ViewerState? State { get; init; }
         public PageRenderTarget? Target { get; init; }
-        public bool IsOpen => State is null && Target is null && ThumbnailPage is null;
+        public bool IsOpen => State is null && Target is null && ThumbnailPage is null && TextPageIndex is null;
         public int Width { get; init; }
         public int Height { get; init; }
         public int ScrollbarWidth { get; init; }
         public TaskCompletionSource<IReadOnlyList<PdfPageSize>> Opened { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<ViewerRenderResult> Rendered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<PdfTextPage> Text { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public void Cancel()
         {
             if (IsOpen) Opened.TrySetCanceled();
+            else if (TextPageIndex.HasValue) Text.TrySetCanceled();
             else Rendered.TrySetCanceled();
         }
         public void Fail(Exception exception)
         {
             if (IsOpen) Opened.TrySetException(exception);
+            else if (TextPageIndex.HasValue) Text.TrySetException(exception);
             else Rendered.TrySetException(exception);
         }
     }

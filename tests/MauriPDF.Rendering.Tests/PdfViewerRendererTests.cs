@@ -347,8 +347,131 @@ public sealed class PdfViewerRendererTests
         finally { engine.Release.Set(); }
     }
 
+    [Fact]
+    public async Task TextIsLazyCachedAndFailureDoesNotAffectRasterWork()
+    {
+        FakeEngine engine = new() { PageCount = 1001 };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenDocumentAsync("large");
+        Assert.Equal(0, engine.TextCount);
+        var first = await viewer.ExtractTextAsync(0);
+        Assert.Same(first, await viewer.ExtractTextAsync(0));
+        Assert.Equal(1, engine.TextCount);
+        await viewer.OpenDocumentAsync("replacement");
+        Assert.NotSame(first, await viewer.ExtractTextAsync(0));
+        Assert.Equal(2, engine.TextCount);
+
+        FakeEngine failing = new() { FailText = true };
+        await using PdfViewerRenderer failureViewer = new(() => failing);
+        await failureViewer.OpenAsync("first");
+        await Assert.ThrowsAsync<InvalidDataException>(() => failureViewer.ExtractTextAsync(0));
+        using ViewerRenderResult render = await failureViewer.RenderVisible([new(0, new(96, 96))])[0];
+        Assert.Equal(1, failing.RenderCount);
+    }
+
+    [Fact]
+    public async Task VisibleRastersPrecedeTextAndTextPrecedesThumbnails()
+    {
+        FakeEngine engine = new() { BlockFirst = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        Task<ViewerRenderResult> old = viewer.RenderVisible([new(0, new(96, 96))])[0];
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Task<ViewerRenderResult> thumbnail = Thumbnail(viewer, 9);
+            var text = viewer.ExtractTextAsync(1);
+            Task<ViewerRenderResult> visible = viewer.RenderVisible([new(2, new(96, 96))])[0];
+            Assert.True(old.IsCanceled);
+            Assert.False(text.IsCanceled);
+            engine.Release.Set();
+            using ViewerRenderResult foreground = await visible;
+            await text;
+            using ViewerRenderResult background = await thumbnail;
+            Assert.Equal(["R0", "R2", "T1", "R9"], engine.WorkOrder);
+        }
+        finally { engine.Release.Set(); }
+    }
+
+    [Fact]
+    public async Task DocumentReplacementRejectsActiveAndPendingText()
+    {
+        FakeEngine engine = new() { BlockText = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        var active = viewer.ExtractTextAsync(0);
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            var pending = viewer.ExtractTextAsync(1);
+            Task<int> opened = viewer.OpenAsync("second");
+            Assert.True(active.IsCanceled);
+            Assert.True(pending.IsCanceled);
+            Assert.Equal(0, engine.ClosedDocuments);
+            engine.Release.Set();
+            await opened;
+            await viewer.ExtractTextAsync(0);
+            Assert.Equal(2, engine.TextCount);
+            Assert.Equal(1, engine.ClosedDocuments);
+        }
+        finally { engine.Release.Set(); }
+    }
+
+    [Fact]
+    public async Task RapidTextDemandHasOneReplaceableSlotAndDoesNotCancelRaster()
+    {
+        FakeEngine engine = new() { BlockText = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        var previous = viewer.ExtractTextAsync(0);
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Task<ViewerRenderResult> visible = viewer.RenderVisible([new(9, new(96, 96))])[0];
+            viewer.CancelThumbnails();
+            Assert.False(previous.IsCanceled);
+            for (int page = 1; page < 1000; page++)
+            {
+                var next = viewer.ExtractTextAsync(page % 10);
+                Assert.True(previous.IsCanceled);
+                previous = next;
+            }
+            Assert.False(visible.IsCanceled);
+            engine.Release.Set();
+            using ViewerRenderResult result = await visible;
+            await previous;
+            Assert.Equal(["T0", "R9", "T9"], engine.WorkOrder);
+        }
+        finally { engine.Release.Set(); }
+    }
+
+    [Fact]
+    public async Task ShutdownWaitsForActiveTextBeforeClosingSession()
+    {
+        FakeEngine engine = new() { BlockText = true };
+        PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        var text = viewer.ExtractTextAsync(0);
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Task shutdown = viewer.DisposeAsync().AsTask();
+            Assert.True(text.IsCanceled);
+            Assert.False(shutdown.IsCompleted);
+            Assert.Equal(0, engine.ClosedDocuments);
+            engine.Release.Set();
+            await shutdown;
+            Assert.Equal(1, engine.ClosedDocuments);
+        }
+        finally { engine.Release.Set(); await viewer.DisposeAsync(); }
+    }
+
     private sealed class FakeEngine : IPdfRenderer
     {
+        public bool BlockText { get; init; }
+        public bool FailText { get; init; }
+        public int TextCount { get; set; }
+        public List<string> WorkOrder { get; } = [];
         public int PageCount { get; init; } = 10;
         public bool BlockGeometry { get; init; }
         public bool BlockFirst { get; init; }
@@ -369,6 +492,18 @@ public sealed class PdfViewerRendererTests
 
         private sealed class Session(FakeEngine engine) : IPdfRenderSession
         {
+            public Core.Text.PdfTextPage ExtractText(int pageIndex)
+            {
+                engine.TextCount++;
+                engine.WorkOrder.Add($"T{pageIndex}");
+                if (engine.BlockText)
+                {
+                    engine.Started.TrySetResult();
+                    engine.Release.Wait();
+                }
+                if (engine.FailText) throw new InvalidDataException("Test text failure.");
+                return new([new((uint)('A' + pageIndex), default)]);
+            }
             public int PageCount => engine.PageCount;
             public PdfPageSize GetPageSize(int pageIndex)
             {
@@ -382,6 +517,7 @@ public sealed class PdfViewerRendererTests
             public RenderedPage RenderPage(int pageIndex, int pixelWidth, int pixelHeight)
             {
                 engine.RenderCount++;
+                engine.WorkOrder.Add($"R{pageIndex}");
                 engine.RenderOrder.Add(pageIndex);
                 if (engine.RenderCount == 1)
                 {
