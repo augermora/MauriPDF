@@ -27,6 +27,11 @@ internal sealed class MainForm : Form
     private readonly ToolStripLabel _zoomLabel = new();
     private readonly ToolStripButton _fitPage = new("Fit Page");
     private readonly ToolStripButton _fitWidth = new("Fit Width");
+    private readonly ToolStripDropDownButton _displayMode = new("Continuous");
+    private readonly ToolStripMenuItem _continuousMode = new("Continuous");
+    private readonly ToolStripMenuItem _singlePageMode = new("Single Page");
+    private readonly ToolStripButton _rotateLeft = new("↶") { ToolTipText = "Rotate counter-clockwise 90° (view only)", AccessibleName = "Rotate counter-clockwise" };
+    private readonly ToolStripButton _rotateRight = new("↷") { ToolTipText = "Rotate clockwise 90° (view only)", AccessibleName = "Rotate clockwise" };
     private readonly ContinuousPdfView _viewport;
     private readonly DocumentSearchBar _searchBar;
     private ViewerState? _state;
@@ -68,12 +73,18 @@ internal sealed class MainForm : Form
         _resetZoom.Click += (_, _) => ChangeState(_state?.SetZoom(100));
         _fitPage.Click += (_, _) => ChangeState(_state?.SetFitMode(ViewerZoomMode.FitPage), refit: true);
         _fitWidth.Click += (_, _) => ChangeState(_state?.SetFitMode(ViewerZoomMode.FitWidth));
+        _displayMode.DropDownItems.AddRange([_continuousMode, _singlePageMode]);
+        _continuousMode.Click += (_, _) => ChangeState(_state?.SetDisplayMode(ViewerDisplayMode.Continuous));
+        _singlePageMode.Click += (_, _) => ChangeState(_state?.SetDisplayMode(ViewerDisplayMode.SinglePage));
+        _rotateLeft.Click += (_, _) => ChangeState(_state?.RotateCounterClockwise());
+        _rotateRight.Click += (_, _) => ChangeState(_state?.RotateClockwise());
         _pageNumber.KeyDown += PageNumber_KeyDown;
         _pageNumber.Leave += (_, _) => UpdateToolbar();
         ToolStrip toolbar = new() { GripStyle = ToolStripGripStyle.Hidden };
         toolbar.Items.AddRange([
             open, _toggleThumbnails, new ToolStripSeparator(), _previous, _pageNumber, _totalPages, _next,
-            new ToolStripSeparator(), _zoomOut, _resetZoom, _zoomIn, _zoomLabel, _fitPage, _fitWidth, _loading
+            new ToolStripSeparator(), _zoomOut, _resetZoom, _zoomIn, _zoomLabel, _fitPage, _fitWidth,
+            _displayMode, _rotateLeft, _rotateRight, _loading
         ]);
         TabPage thumbnailsTab = new("Thumbnails");
         thumbnailsTab.Controls.Add(_thumbnails);
@@ -287,6 +298,11 @@ internal sealed class MainForm : Form
 
     private void UpdateToolbar()
     {
+        _thumbnails.SetRotation(_state?.Rotation ?? default);
+        _displayMode.Enabled = _rotateLeft.Enabled = _rotateRight.Enabled = _state is not null;
+        _singlePageMode.Checked = _state?.DisplayMode == ViewerDisplayMode.SinglePage;
+        _continuousMode.Checked = !_singlePageMode.Checked;
+        _displayMode.Text = _singlePageMode.Checked ? "Single Page" : "Continuous";
         if (_state is not null) _thumbnails.SetCurrentPage(_state.PageIndex);
         _previous.Enabled = _state?.CanGoPrevious == true;
         _next.Enabled = _state?.CanGoNext == true;

@@ -6,6 +6,7 @@ using Xunit;
 
 namespace MauriPDF.Rendering.Tests;
 
+[Collection("PDFium native")]
 public sealed class PdfOutlineIntegrationTests
 {
     [Fact]

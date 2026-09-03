@@ -723,6 +723,67 @@ public sealed class PdfViewerRendererTests
         finally { engine.Release.Set(); await viewer.DisposeAsync(); }
     }
 
+    [Fact]
+    public async Task RasterAndThumbnailCachesSeparateEqualSizedOrientations()
+    {
+        FakeEngine engine = new();
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        using ViewerRenderResult normal = await viewer.RenderVisible([new(0, new(96, 96))])[0];
+        using ViewerRenderResult turned = await viewer.RenderVisible([new(0, new(96, 96), new(180))])[0];
+        using ViewerRenderResult returned = await viewer.RenderVisible([new(0, new(96, 96))])[0];
+        Assert.False(turned.FromCache);
+        Assert.True(returned.FromCache);
+        Assert.NotEqual(normal.Pixels.Pixels.Span[0], turned.Pixels.Pixels.Span[0]);
+        foreach (int degrees in new[] { 0, 90, 180, 270 })
+        {
+            viewer.CancelThumbnails();
+            Assert.True(viewer.TryRequestThumbnail(0, out var task, new(degrees)));
+            using ViewerRenderResult thumbnail = await task!;
+            Assert.False(thumbnail.FromCache);
+            Assert.Equal(degrees / 90 * 10, thumbnail.Pixels.Pixels.Span[0]);
+        }
+        viewer.CancelThumbnails();
+        Assert.True(viewer.TryRequestThumbnail(0, out var cached, new(180)));
+        using ViewerRenderResult hit = await cached!;
+        Assert.True(hit.FromCache);
+        Assert.Equal(6, engine.RenderCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RotationChangeRejectsOldOrientationAndDisposesPixels(bool thumbnail)
+    {
+        FakeEngine engine = new() { BlockFirst = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("first");
+        Task<ViewerRenderResult> old = thumbnail ? Thumbnail(viewer, 0) : viewer.RenderVisible([new(0, new(96, 96))])[0];
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Task<ViewerRenderResult> current;
+            if (thumbnail)
+            {
+                viewer.CancelThumbnails();
+                Assert.True(viewer.TryRequestThumbnail(0, out var task, new(180)));
+                current = task!;
+            }
+            else current = viewer.RenderVisible([new(0, new(96, 96), new(180))])[0];
+            Assert.True(old.IsCanceled);
+            engine.Release.Set();
+            using ViewerRenderResult result = await current;
+            Assert.False(result.FromCache);
+            Assert.Equal(20, result.Pixels.Pixels.Span[0]);
+            Assert.Equal(1, engine.Owners[0].DisposeCount);
+            await viewer.OpenAsync("replacement");
+            using ViewerRenderResult fresh = await viewer.RenderVisible([new(0, new(96, 96))])[0];
+            Assert.False(fresh.FromCache);
+            Assert.Equal(0, fresh.Pixels.Pixels.Span[0]);
+        }
+        finally { engine.Release.Set(); }
+    }
+
     private sealed class FakeEngine : IPdfRenderer
     {
         public bool BlockOutline { get; init; }
@@ -786,7 +847,7 @@ public sealed class PdfViewerRendererTests
                 }
                 return new(72, 72);
             }
-            public RenderedPage RenderPage(int pageIndex, int pixelWidth, int pixelHeight)
+            public RenderedPage RenderPage(int pageIndex, int pixelWidth, int pixelHeight, VisualRotation rotation = default)
             {
                 engine.RenderCount++;
                 engine.WorkOrder.Add($"R{pageIndex}");
@@ -799,7 +860,7 @@ public sealed class PdfViewerRendererTests
                 }
 
                 TrackingOwner owner = new(pixelWidth * pixelHeight * 4);
-                owner.Memory.Span.Fill((byte)pageIndex);
+                owner.Memory.Span.Fill((byte)(pageIndex + rotation.QuarterTurns * 10));
                 engine.Owners.Add(owner);
                 return new RenderedPage(pixelWidth, pixelHeight, pixelWidth * 4, RenderedPixelFormat.Bgra32, owner);
             }

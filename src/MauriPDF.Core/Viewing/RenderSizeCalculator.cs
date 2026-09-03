@@ -12,6 +12,7 @@ public static class RenderSizeCalculator
         int verticalScrollbarWidth = 0)
     {
         ArgumentNullException.ThrowIfNull(state);
+        page = state.Rotation.EffectiveSize(page);
         if (!double.IsFinite(page.WidthPoints) || !double.IsFinite(page.HeightPoints)
             || page.WidthPoints <= 0 || page.HeightPoints <= 0)
         {

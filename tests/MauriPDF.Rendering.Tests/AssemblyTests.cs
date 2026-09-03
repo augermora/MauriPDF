@@ -6,6 +6,8 @@ using Xunit;
 
 namespace MauriPDF.Rendering.Tests;
 
+// Native PDFium calls must be serialized across integration-test classes too.
+[Collection("PDFium native")]
 public sealed class AssemblyTests
 {
     [Fact]

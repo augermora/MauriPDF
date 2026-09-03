@@ -3,7 +3,7 @@ using MauriPDF.Core.Rendering;
 
 namespace MauriPDF.Rendering;
 
-public readonly record struct RenderCacheKey(long DocumentId, int PageIndex, int Width, int Height);
+public readonly record struct RenderCacheKey(long DocumentId, int PageIndex, int Width, int Height, Core.Viewing.VisualRotation Rotation = default);
 
 /// <summary>Single-worker LRU cache. Store transfers ownership; reads return independent disposable copies.</summary>
 public sealed class RenderCache : IDisposable

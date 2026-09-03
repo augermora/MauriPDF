@@ -33,7 +33,10 @@ internal sealed partial class ContinuousPdfView
 
     public void ActivateSearchMatch()
     {
-        _searchNavigation = _search?.Active;
+        var active = _search?.Active;
+        if (active.HasValue && _state?.DisplayMode == Core.Viewing.ViewerDisplayMode.SinglePage)
+            NavigatePage(active.Value.PageIndex);
+        _searchNavigation = active;
         if (_searchNavigation is null) return;
         NavigateSearchIfReady();
         RefreshSearchGeometry();
@@ -91,7 +94,7 @@ internal sealed partial class ContinuousPdfView
                 }
             }
             NavigateSearchIfReady();
-            Invalidate(PageRectangle(page));
+            if (_layout?.ContainsPage(page) == true) Invalidate(PageRectangle(page));
         }
     }
 
@@ -104,8 +107,9 @@ internal sealed partial class ContinuousPdfView
         {
             TextBounds box = text[index].Bounds;
             if (!box.HasArea) continue;
-            double x = _layout.Left(match.PageIndex, ViewWidth) + (box.Left + box.Right) / 2 * page.Width;
-            double y = page.Top + (box.Top + box.Bottom) / 2 * page.Height;
+            TextPoint center = _layout.Rotation.ToDisplay(new((box.Left + box.Right) / 2, (box.Top + box.Bottom) / 2));
+            double x = _layout.Left(match.PageIndex, ViewWidth) + center.X * page.Width;
+            double y = page.Top + center.Y * page.Height;
             bool comfortable = x >= _left + ViewWidth * .15 && x <= _left + ViewWidth * .85
                 && y >= _top + ViewHeight * .2 && y <= _top + ViewHeight * .8;
             if (!comfortable) MoveTo(y - ViewHeight / 2, x - ViewWidth / 2);
@@ -126,7 +130,7 @@ internal sealed partial class ContinuousPdfView
             {
                 TextBounds box = text[index].Bounds;
                 if (!box.HasArea || text[index].Unicode is 0 or 10 or 13) continue;
-                TextBounds mapped = TextCoordinateTransform.ToDisplay(box, display.Left, display.Top, display.Width, display.Height);
+                TextBounds mapped = TextCoordinateTransform.ToDisplay(box, display.Left, display.Top, display.Width, display.Height, _layout!.Rotation);
                 graphics.FillRectangle(brush, (float)mapped.Left, (float)mapped.Top,
                     (float)(mapped.Right - mapped.Left), (float)(mapped.Bottom - mapped.Top));
             }

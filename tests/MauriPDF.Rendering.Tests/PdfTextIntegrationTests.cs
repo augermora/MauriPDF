@@ -2,10 +2,12 @@ using System.Globalization;
 using System.Text;
 using MauriPDF.Core.Rendering;
 using MauriPDF.Core.Text;
+using MauriPDF.Core.Viewing;
 using Xunit;
 
 namespace MauriPDF.Rendering.Tests;
 
+[Collection("PDFium native")]
 public sealed class PdfTextIntegrationTests
 {
     [Fact]
@@ -30,32 +32,50 @@ public sealed class PdfTextIntegrationTests
     }
 
     [Theory]
-    [InlineData(0)]
-    [InlineData(90)]
-    [InlineData(180)]
-    [InlineData(270)]
-    public void TextBoundsAlignWithRenderedGlyphForCropAndRotation(int rotation)
+    [InlineData(0, 0)]
+    [InlineData(0, 90)]
+    [InlineData(0, 180)]
+    [InlineData(0, 270)]
+    [InlineData(90, 0)]
+    [InlineData(90, 90)]
+    [InlineData(90, 180)]
+    [InlineData(90, 270)]
+    [InlineData(180, 0)]
+    [InlineData(180, 90)]
+    [InlineData(180, 180)]
+    [InlineData(180, 270)]
+    [InlineData(270, 0)]
+    [InlineData(270, 90)]
+    [InlineData(270, 180)]
+    [InlineData(270, 270)]
+    public void TextBoundsAlignWithRenderedGlyphForCropAndRotation(int rotation, int visualDegrees)
     {
-        WithPdf("BT /F1 24 Tf 65 110 Td <41> Tj ET", $"/CropBox [40 40 180 180] /Rotate {rotation}", session =>
+        WithPdf("BT /F1 24 Tf 65 110 Td <41> Tj ET", $"/CropBox [40 40 180 160] /Rotate {rotation}", session =>
         {
+            VisualRotation visual = new(visualDegrees);
+            PdfPageSize intrinsicSize = session.GetPageSize(0);
+            Assert.Equal(rotation % 180 == 0 ? new PdfPageSize(140, 120) : new(120, 140), intrinsicSize);
+            PdfPageSize effective = visual.EffectiveSize(intrinsicSize);
+            int width = (int)effective.WidthPoints * 4, height = (int)effective.HeightPoints * 4;
             PdfTextPage text = session.ExtractText(0);
             TextBounds bounds = text[0].Bounds;
             Assert.True(bounds.HasArea);
-            using RenderedPage render = session.RenderPage(0, 560, 560);
-            int minX = 560, minY = 560, maxX = 0, maxY = 0;
+            using RenderedPage render = session.RenderPage(0, width, height, visual);
+            int minX = width, minY = height, maxX = 0, maxY = 0;
             ReadOnlySpan<byte> pixels = render.Pixels.Span;
-            for (int y = 0; y < 560; y++)
-                for (int x = 0; x < 560; x++)
+            for (int y = 0; y < height; y++)
+                for (int x = 0; x < width; x++)
                     if (pixels[y * render.Stride + x * 4] < 128)
                     {
                         minX = Math.Min(minX, x); minY = Math.Min(minY, y);
                         maxX = Math.Max(maxX, x); maxY = Math.Max(maxY, y);
                     }
             Assert.True(minX < maxX && minY < maxY);
-            Assert.InRange(Math.Abs(bounds.Left * 560 - minX), 0, 3);
-            Assert.InRange(Math.Abs(bounds.Top * 560 - minY), 0, 3);
-            Assert.InRange(Math.Abs(bounds.Right * 560 - maxX), 0, 3);
-            Assert.InRange(Math.Abs(bounds.Bottom * 560 - maxY), 0, 3);
+            TextBounds displayed = TextCoordinateTransform.ToDisplay(bounds, 0, 0, width, height, visual);
+            Assert.InRange(Math.Abs(displayed.Left - minX), 0, 3);
+            Assert.InRange(Math.Abs(displayed.Top - minY), 0, 3);
+            Assert.InRange(Math.Abs(displayed.Right - maxX), 0, 3);
+            Assert.InRange(Math.Abs(displayed.Bottom - maxY), 0, 3);
         });
     }
 
@@ -110,10 +130,14 @@ public sealed class PdfTextIntegrationTests
             Write($"xref\n0 {objects.Length + 1}\n0000000000 65535 f \n");
             foreach (long offset in offsets) Write($"{offset.ToString("D10", CultureInfo.InvariantCulture)} 00000 n \n");
             Write($"trailer\n<< /Size {objects.Length + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n");
-            File.WriteAllBytes(path, stream.ToArray());
-            using PdfiumRenderer renderer = new();
-            using IPdfRenderSession session = renderer.Open(path);
-            test(session);
+            byte[] original = stream.ToArray();
+            File.WriteAllBytes(path, original);
+            using (PdfiumRenderer renderer = new())
+            {
+                using IPdfRenderSession session = renderer.Open(path);
+                test(session);
+            }
+            Assert.Equal(original, File.ReadAllBytes(path)); // Presentation never changes source bytes.
         }
         finally { File.Delete(path); }
     }

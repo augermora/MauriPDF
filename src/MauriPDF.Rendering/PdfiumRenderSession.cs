@@ -104,7 +104,7 @@ internal sealed class PdfiumRenderSession : IPdfRenderSession
         return new PdfPageSize(width, height);
     }
 
-    public unsafe RenderedPage RenderPage(int pageIndex, int pixelWidth, int pixelHeight)
+    public unsafe RenderedPage RenderPage(int pageIndex, int pixelWidth, int pixelHeight, Core.Viewing.VisualRotation rotation = default)
     {
         FpdfDocumentT document = GetDocument();
         ValidatePageIndex(pageIndex);
@@ -153,7 +153,7 @@ internal sealed class PdfiumRenderSession : IPdfRenderSession
                 0,
                 pixelWidth,
                 pixelHeight,
-                0,
+                rotation.QuarterTurns,
                 (int)RenderFlags.RenderAnnotations);
 
             RenderedPage result = new(

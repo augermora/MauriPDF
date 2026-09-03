@@ -1,5 +1,11 @@
 namespace MauriPDF.Core.Viewing;
 
+public enum ViewerDisplayMode
+{
+    Continuous,
+    SinglePage
+}
+
 public enum ViewerZoomMode
 {
     Manual,
@@ -24,6 +30,15 @@ public sealed record ViewerState
     public int PageIndex { get; private init; }
     public int ZoomPercent { get; private init; } = 100;
     public ViewerZoomMode ZoomMode { get; private init; }
+    public ViewerDisplayMode DisplayMode { get; private init; }
+    public VisualRotation Rotation { get; private init; }
+    public ViewerState RotateClockwise() => this with { Rotation = Rotation.Clockwise() };
+    public ViewerState RotateCounterClockwise() => this with { Rotation = Rotation.CounterClockwise() };
+    public ViewerState SetDisplayMode(ViewerDisplayMode mode)
+    {
+        if (!Enum.IsDefined(mode)) throw new ArgumentOutOfRangeException(nameof(mode));
+        return this with { DisplayMode = mode };
+    }
     public bool CanGoPrevious => PageIndex > 0;
     public bool CanGoNext => PageIndex < PageCount - 1;
 

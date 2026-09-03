@@ -8,7 +8,7 @@ public interface IPdfRenderSession : IDisposable
     PdfPageSize GetPageSize(int pageIndex);
 
     /// <summary>Renders a page at the requested pixel size. The caller owns and must dispose the result.</summary>
-    RenderedPage RenderPage(int pageIndex, int pixelWidth, int pixelHeight);
+    RenderedPage RenderPage(int pageIndex, int pixelWidth, int pixelHeight, Viewing.VisualRotation rotation = default);
 
     /// <summary>Extracts immutable text-layer data. The implementation closes all temporary native handles before return.</summary>
     Text.PdfTextPage ExtractText(int pageIndex);

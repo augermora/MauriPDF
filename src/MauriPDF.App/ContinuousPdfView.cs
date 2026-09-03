@@ -21,6 +21,7 @@ internal sealed partial class ContinuousPdfView : Control
     private PageRange _range = new(0, -1);
     private double _top, _left;
     private int _layoutViewportHeight;
+    private int _layoutViewportWidth;
     private long _generation;
     private bool _disposed;
     private bool _ready;
@@ -31,7 +32,7 @@ internal sealed partial class ContinuousPdfView : Control
         Dock = DockStyle.Fill;
         BackColor = Color.DarkGray;
         TabStop = true;
-        AccessibleName = "Continuous PDF document";
+        AccessibleName = "PDF document";
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
             | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
         Controls.Add(_vertical);
@@ -39,7 +40,7 @@ internal sealed partial class ContinuousPdfView : Control
         _vertical.Scroll += (_, e) =>
         {
             _searchNavigation = null;
-            MoveTo(ScrollOffset(e, _top, MaxTop, ViewHeight), _left);
+            MoveTo(ScrollOffset(e, _top - MinTop, MaxTop - MinTop, ViewHeight) + MinTop, _left);
             e.NewValue = _vertical.Value;
         };
         _horizontal.Scroll += (_, e) =>
@@ -58,7 +59,8 @@ internal sealed partial class ContinuousPdfView : Control
     public event Action<Exception>? RenderFailed;
     private int ViewWidth => Math.Max(1, ClientSize.Width - _vertical.Width);
     private int ViewHeight => Math.Max(1, ClientSize.Height - _horizontal.Height);
-    private double MaxTop => Math.Max(0, (_layout?.Height ?? 0) - ViewHeight);
+    private double MinTop => _layout?.MinimumScrollTop(ViewHeight) ?? 0;
+    private double MaxTop => _layout?.MaximumScrollTop(ViewHeight) ?? 0;
     private double MaxLeft => Math.Max(0, (_layout?.Width ?? 0) - ViewWidth);
 
     public void SetDocument(IReadOnlyList<PdfPageSize>? sizes)
@@ -80,16 +82,38 @@ internal sealed partial class ContinuousPdfView : Control
     public void ApplyState(ViewerState state, bool navigate = false, bool refit = false)
     {
         bool scaleChanged = _state is null || state.ZoomMode != _state.ZoomMode || state.ZoomPercent != _state.ZoomPercent;
+        bool orientationChanged = _state?.Rotation != state.Rotation;
+        bool modeChanged = _state?.DisplayMode != state.DisplayMode;
+        bool singlePageChanged = state.DisplayMode == ViewerDisplayMode.SinglePage && _state?.PageIndex != state.PageIndex;
         navigate |= _state?.PageIndex != state.PageIndex;
-        if (navigate) _searchNavigation = null;
+        if (navigate || modeChanged) _searchNavigation = null;
+        if (orientationChanged || modeChanged || singlePageChanged)
+        {
+            _draggingText = false;
+            Capture = false;
+            CancelDemand();
+            ClearImages();
+        }
         _state = state;
-        if (scaleChanged || refit) RebuildLayout();
+        if (scaleChanged || refit || orientationChanged || modeChanged || singlePageChanged) RebuildLayout();
         if (navigate && _layout is not null) MoveTo(_layout.ScrollTarget(state.PageIndex, ViewHeight), _left);
+    }
+
+    private void NavigatePage(int pageIndex)
+    {
+        if (_state is null) return;
+        ApplyState(_state.GoToPage(pageIndex + 1), navigate: true);
+        CurrentPageChanged?.Invoke(_state!.PageIndex);
     }
 
     public void ScrollViewport(int direction)
     {
         _searchNavigation = null;
+        if (_layout?.PageScrollNavigates(ViewHeight) == true && _state is not null)
+        {
+            NavigatePage(_state.PageIndex + Math.Sign(direction));
+            return;
+        }
         MoveTo(_top + direction * ViewHeight * 0.9, _left);
     }
     public void ScrollLine(int direction)
@@ -101,7 +125,7 @@ internal sealed partial class ContinuousPdfView : Control
     private void RebuildLayout()
     {
         if (!_ready || _disposed) return;
-        ReadingAnchor? anchor = _layout?.CaptureAnchor(_top, _layoutViewportHeight);
+        ReadingAnchor? anchor = _layout?.CaptureAnchor(_top, _layoutViewportHeight, _left, _layoutViewportWidth);
         try
         {
             ContinuousPageLayout? next = _sizes is not null && _state is not null
@@ -110,8 +134,18 @@ internal sealed partial class ContinuousPdfView : Control
             _failed.Clear();
             _layout = next;
             _layoutViewportHeight = ViewHeight;
+            _layoutViewportWidth = ViewWidth;
             _range = new(0, -1);
-            if (anchor.HasValue && next is not null) _top = next.RestoreAnchor(anchor.Value, ViewHeight);
+            if (anchor.HasValue && next is not null && next.ContainsPage(anchor.Value.PageIndex))
+            {
+                _top = next.RestoreAnchor(anchor.Value, ViewHeight);
+                _left = next.RestoreHorizontalAnchor(anchor.Value, ViewWidth);
+            }
+            else if (next is not null && _state is not null)
+            {
+                _top = next.ScrollTarget(_state.PageIndex, ViewHeight);
+                _left = 0;
+            }
             MoveTo(_top, _left);
         }
         catch (Exception exception) { RenderFailed?.Invoke(exception); }
@@ -129,9 +163,9 @@ internal sealed partial class ContinuousPdfView : Control
 
     private void MoveTo(double top, double left)
     {
-        _top = Math.Clamp(top, 0, MaxTop);
+        _top = Math.Clamp(top, MinTop, MaxTop);
         _left = Math.Clamp(left, 0, MaxLeft);
-        UpdateScrollBar(_vertical, _top, MaxTop, ViewHeight);
+        UpdateScrollBar(_vertical, _top - MinTop, MaxTop - MinTop, ViewHeight);
         UpdateScrollBar(_horizontal, _left, MaxLeft, ViewWidth);
         if (_layout is not null && _state is not null)
         {
@@ -167,7 +201,7 @@ internal sealed partial class ContinuousPdfView : Control
         foreach (int index in _images.Keys.ToArray())
         {
             Bitmap image = _images[index];
-            RenderSize target = VisiblePageDemand.Target(_layout[index], Math.Max(1, next.Count));
+            RenderSize target = _layout.ContainsPage(index) ? VisiblePageDemand.Target(_layout[index], Math.Max(1, next.Count)) : default;
             if (index < next.First || index > next.Last || image.Width != target.Width || image.Height != target.Height)
             {
                 image.Dispose();
@@ -185,7 +219,7 @@ internal sealed partial class ContinuousPdfView : Control
         for (int index = _range.First; index <= _range.Last; index++)
         {
             if (!_images.ContainsKey(index) && !_failed.Contains(index))
-                targets.Add(new(index, VisiblePageDemand.Target(_layout[index], _range.Count)));
+                targets.Add(new(index, VisiblePageDemand.Target(_layout[index], _range.Count), _state!.Rotation));
         }
         if (targets.Count == 0) return;
         int current = _layout.CurrentPage(_top, ViewHeight);

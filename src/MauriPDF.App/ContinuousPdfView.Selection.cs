@@ -19,7 +19,7 @@ internal sealed partial class ContinuousPdfView
 
     public event Action<string>? SelectionStatusChanged;
 
-    private readonly record struct PageTextPoint(int Page, TextPoint Point);
+    private readonly record struct PageTextPoint(int Page, TextPoint Point, int Width, int Height);
 
     private void InitializeSelection()
     {
@@ -99,7 +99,9 @@ internal sealed partial class ContinuousPdfView
         double left = _layout.Left(page, ViewWidth) - _left;
         double top = geometry.Top - _top;
         if (!nearest && (point.X < left || point.X > left + geometry.Width || point.Y < top || point.Y > top + geometry.Height)) return null;
-        return new(page, TextCoordinateTransform.ToPage(point.X, point.Y, left, top, geometry.Width, geometry.Height));
+        var rotation = _layout.Rotation;
+        return new(page, TextCoordinateTransform.ToPage(point.X, point.Y, left, top, geometry.Width, geometry.Height, rotation),
+            rotation.SwapsDimensions ? geometry.Height : geometry.Width, rotation.SwapsDimensions ? geometry.Width : geometry.Height);
     }
 
     private async void ResolveSelection()
@@ -118,8 +120,7 @@ internal sealed partial class ContinuousPdfView
             }
             if (_textAnchor is null)
             {
-                var anchorGeometry = _layout[anchor.Page];
-                int? hit = anchorText.HitTest(anchor.Point, anchorGeometry.Width, anchorGeometry.Height, 6);
+                int? hit = anchorText.HitTest(anchor.Point, anchor.Width, anchor.Height, 6);
                 if (hit is null)
                 {
                     ClearSelection(); // Blank or image-only page: no selection and no clipboard action.
@@ -150,8 +151,7 @@ internal sealed partial class ContinuousPdfView
                     continue; // Re-read the latest drag endpoint, not a queue of mouse movements.
                 }
                 PdfTextPage endText = _textPages[end.Page];
-                var endGeometry = _layout[end.Page];
-                int endOffset = endText.HitTest(end.Point, endGeometry.Width, endGeometry.Height, double.PositiveInfinity) ?? 0;
+                int endOffset = endText.HitTest(end.Point, end.Width, end.Height, double.PositiveInfinity) ?? 0;
                 _selection = new TextSelection(_textAnchor.Value, new TextPosition(end.Page, endOffset));
                 _selectionReady = true;
                 SelectionStatusChanged?.Invoke(string.Empty);
@@ -180,7 +180,7 @@ internal sealed partial class ContinuousPdfView
         {
             TextBounds box = text[index].Bounds;
             if (!box.HasArea || text[index].Unicode is 0 or 10 or 13) continue;
-            TextBounds mapped = TextCoordinateTransform.ToDisplay(box, display.Left, display.Top, display.Width, display.Height);
+            TextBounds mapped = TextCoordinateTransform.ToDisplay(box, display.Left, display.Top, display.Width, display.Height, _layout!.Rotation);
             graphics.FillRectangle(_selectionBrush, (float)mapped.Left, (float)mapped.Top,
                 (float)(mapped.Right - mapped.Left), (float)(mapped.Bottom - mapped.Top));
         }

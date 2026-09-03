@@ -241,14 +241,14 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
     }
 
     /// <summary>Single-consumer thumbnail request. False means duplicate: no task/ownership is shared.</summary>
-    public bool TryRequestThumbnail(int pageIndex, out Task<ViewerRenderResult>? task)
+    public bool TryRequestThumbnail(int pageIndex, out Task<ViewerRenderResult>? task, VisualRotation rotation = default)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(pageIndex);
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_stopping, this);
-            if ((_active?.ThumbnailPage == pageIndex && IsCurrent(_active) && !_active.Rendered.Task.IsCompleted)
-                || _pendingThumbnail?.ThumbnailPage == pageIndex)
+            if ((_active?.ThumbnailPage == pageIndex && _active.Rotation == rotation && IsCurrent(_active) && !_active.Rendered.Task.IsCompleted)
+                || (_pendingThumbnail?.ThumbnailPage == pageIndex && _pendingThumbnail.Rotation == rotation))
             {
                 System.Diagnostics.Debug.WriteLine($"Thumbnail {pageIndex + 1}: duplicate skipped");
                 task = null;
@@ -259,6 +259,7 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
             Request request = new()
             {
                 ThumbnailPage = pageIndex,
+                Rotation = rotation,
                 ThumbnailVersion = _thumbnailVersion,
                 DocumentGeneration = _documentGeneration
             };
@@ -431,11 +432,12 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
 
                         int pageIndex = request.ThumbnailPage ?? request.Target?.PageIndex ?? request.State!.PageIndex;
                         PdfPageSize pageSize = session.GetPageSize(pageIndex);
+                        VisualRotation rotation = request.ThumbnailPage.HasValue ? request.Rotation : request.Target?.Rotation ?? request.State!.Rotation;
                         RenderSize size = request.ThumbnailPage.HasValue
-                            ? ThumbnailSizeCalculator.Calculate(pageSize)
+                            ? ThumbnailSizeCalculator.Calculate(rotation.EffectiveSize(pageSize))
                             : request.Target?.Size ?? RenderSizeCalculator.Calculate(pageSize, request.State!, request.Width, request.Height, request.ScrollbarWidth);
                         RenderCache cache = request.ThumbnailPage.HasValue ? _thumbnailCache : _cache;
-                        RenderCacheKey key = new(_documentId, pageIndex, size.Width, size.Height);
+                        RenderCacheKey key = new(_documentId, pageIndex, size.Width, size.Height, rotation);
                         lock (_gate)
                         {
                             if (!IsCurrent(request)) continue;
@@ -444,7 +446,7 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
                         bool hit = pixels is not null;
                         if (pixels is null)
                         {
-                            pixels = session.RenderPage(pageIndex, size.Width, size.Height);
+                            pixels = session.RenderPage(pageIndex, size.Width, size.Height, rotation);
                             // Native work cannot be interrupted. Never cache or publish obsolete pixels.
                             lock (_gate)
                             {
@@ -541,6 +543,7 @@ public sealed class PdfViewerRenderer : IAsyncDisposable
     private sealed class Request
     {
         public long Version { get; set; }
+        public VisualRotation Rotation { get; init; }
         public bool IsOutline { get; init; }
         public long OutlineVersion { get; init; }
         public int? ThumbnailPage { get; init; }

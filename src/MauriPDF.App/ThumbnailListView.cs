@@ -23,6 +23,7 @@ internal sealed class ThumbnailListView : ListView
     private bool _selecting;
     private bool _ready;
     private bool _disposed;
+    private Core.Viewing.VisualRotation _rotation;
 
     public ThumbnailListView(PdfViewerRenderer renderer)
     {
@@ -47,6 +48,7 @@ internal sealed class ThumbnailListView : ListView
 
     public void SetDocument(int pageCount)
     {
+        _rotation = default;
         CancelGeneration();
         ClearImages();
         _failed.Clear();
@@ -69,6 +71,18 @@ internal sealed class ThumbnailListView : ListView
         CancelGeneration();
         if (!active) ClearImages();
         _lastTop = _lastCount = -1;
+        CheckVisibleRange();
+    }
+
+    public void SetRotation(Core.Viewing.VisualRotation rotation)
+    {
+        if (_rotation == rotation) return;
+        _rotation = rotation;
+        CancelGeneration();
+        ClearImages();
+        _failed.Clear();
+        _lastTop = _lastCount = -1;
+        Invalidate();
         CheckVisibleRange();
     }
 
@@ -168,7 +182,7 @@ internal sealed class ThumbnailListView : ListView
             if (_images.ContainsKey(index) || _failed.Contains(index)) continue;
             try
             {
-                if (!_renderer.TryRequestThumbnail(index, out Task<ViewerRenderResult>? task)) continue;
+                if (!_renderer.TryRequestThumbnail(index, out Task<ViewerRenderResult>? task, _rotation)) continue;
                 using ViewerRenderResult result = await task!;
                 if (_disposed || !_active || generation != _generation) return;
                 Bitmap bitmap = WinFormsImageConverter.CreateBitmap(result.Pixels);

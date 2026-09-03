@@ -58,7 +58,8 @@ public sealed class ContinuousPageLayoutTests
         Assert.Equal(4, layout.CurrentPage(shortTarget, 200));
         Assert.Equal(layout[4].Top + 48 - 100, shortTarget);
         Assert.Equal(layout[4].Top, layout.ScrollTarget(4, 50));
-        Assert.Equal(0, layout.ScrollTarget(0, 1000));
+        Assert.Equal(-436, layout.ScrollTarget(0, 1000)); // Outer gutter keeps a short first page at the viewport center.
+        Assert.Equal(0, layout.CurrentPage(layout.ScrollTarget(0, 1000), 1000));
     }
 
     [Fact]
