@@ -8,6 +8,7 @@ namespace MauriPDF.App;
 internal sealed class MainForm : Form
 {
     private readonly PdfViewerRenderer _renderer;
+    private readonly IPdfDocumentMaterializer _materializer;
     private readonly ThumbnailListView _thumbnails;
     private readonly OutlineView _outline = new();
     private readonly TabControl _navigationTabs = new() { Dock = DockStyle.Fill };
@@ -18,6 +19,7 @@ internal sealed class MainForm : Form
     };
     private readonly ToolStripButton _toggleThumbnails = new("Sidebar") { Checked = true, ToolTipText = "Show/hide navigation sidebar (F4)" };
     private readonly ToolStripLabel _loading = new();
+    private readonly ToolStripButton _open = new("Open PDF");
     private readonly ToolStripButton _previous = new("<") { ToolTipText = "Previous page" };
     private readonly ToolStripButton _next = new(">") { ToolTipText = "Next page" };
     private readonly ToolStripTextBox _pageNumber = new() { AutoSize = false, Width = 55, AccessibleName = "Page number" };
@@ -45,15 +47,20 @@ internal sealed class MainForm : Form
     private readonly ToolStripMenuItem _rotatePageCounterClockwise = new("Rotate page counter-clockwise (edit)");
     private readonly ToolStripMenuItem _undo = new("Undo") { ShortcutKeyDisplayString = "Ctrl+Z" };
     private readonly ToolStripMenuItem _redo = new("Redo") { ShortcutKeyDisplayString = "Ctrl+Y" };
+    private readonly ToolStripButton _saveAs = new("Save As") { ToolTipText = "Save edited pages to a new PDF (Ctrl+Shift+S)" };
     private ViewerState? _state;
+    private string? _sourcePath;
+    private string? _savedDocumentPath;
     private long _requestId;
     private bool _resourcesDisposed;
     private bool _closing;
     private bool _shutdownComplete;
+    private bool _saving;
 
-    public MainForm(PdfViewerRenderer renderer)
+    public MainForm(PdfViewerRenderer renderer, IPdfDocumentMaterializer? materializer = null)
     {
         _renderer = renderer;
+        _materializer = materializer ?? new PdfiumDocumentMaterializer();
         _viewport = new ContinuousPdfView(renderer);
         _searchBar = new DocumentSearchBar(renderer, _viewport);
         _viewport.RenderFailed += ShowError;
@@ -76,8 +83,8 @@ internal sealed class MainForm : Form
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(850, 600);
 
-        ToolStripButton open = new("Open PDF");
-        open.Click += (_, _) => ChooseDocument();
+        _open.Click += (_, _) => ChooseDocument();
+        _saveAs.Click += async (_, _) => await ChooseSaveAsAsync();
         _previous.Click += (_, _) => ChangeState(_state?.PreviousPage(), navigate: true);
         _next.Click += (_, _) => ChangeState(_state?.NextPage(), navigate: true);
         _zoomOut.Click += (_, _) => ChangeState(_state?.ZoomOut());
@@ -103,7 +110,7 @@ internal sealed class MainForm : Form
         _pageNumber.Leave += (_, _) => UpdateToolbar();
         ToolStrip toolbar = new() { GripStyle = ToolStripGripStyle.Hidden };
         toolbar.Items.AddRange([
-            open, _toggleThumbnails, new ToolStripSeparator(), _previous, _pageNumber, _totalPages, _next,
+            _open, _saveAs, _toggleThumbnails, new ToolStripSeparator(), _previous, _pageNumber, _totalPages, _next,
             new ToolStripSeparator(), _zoomOut, _resetZoom, _zoomIn, _zoomLabel, _fitPage, _fitWidth,
             _displayMode, _rotateLeft, _rotateRight, _pageEdits, _loading
         ]);
@@ -134,6 +141,11 @@ internal sealed class MainForm : Form
         if (keyData == (Keys.Control | Keys.O))
         {
             ChooseDocument();
+            return true;
+        }
+        if (keyData == (Keys.Control | Keys.Shift | Keys.S))
+        {
+            _ = ChooseSaveAsAsync();
             return true;
         }
 
@@ -204,6 +216,7 @@ internal sealed class MainForm : Form
         base.OnFormClosing(e);
         if (_shutdownComplete || e.Cancel) return;
         e.Cancel = true;
+        if (_saving) { _loading.Text = "Saving..."; return; }
         if (_closing) return;
         if (!ConfirmDiscardChanges()) return;
         _closing = true;
@@ -233,7 +246,7 @@ internal sealed class MainForm : Form
 
     private async void ChooseDocument()
     {
-        if (_closing) return;
+        if (_closing || _saving) return;
         using OpenFileDialog dialog = new()
         {
             CheckFileExists = true,
@@ -250,7 +263,7 @@ internal sealed class MainForm : Form
 
     private async Task OpenDocumentAsync(string path)
     {
-        if (_closing || !ConfirmDiscardChanges()) return;
+        if (_closing || _saving || !ConfirmDiscardChanges()) return;
         CloseDocument();
         long requestId = ++_requestId;
         _loading.Text = "Opening...";
@@ -262,6 +275,8 @@ internal sealed class MainForm : Form
                 return;
             }
 
+            _sourcePath = Path.GetFullPath(path);
+            _savedDocumentPath = null;
             _documentName = Path.GetFileName(path);
             _loading.Text = string.Empty;
             _state = new ViewerState(pages.Count);
@@ -334,12 +349,14 @@ internal sealed class MainForm : Form
     private void UpdateToolbar()
     {
         Text = _documentName is null ? "MauriPDF" : $"MauriPDF — {_documentName}{(_edits?.IsDirty == true ? " *" : "")}";
-        _pageEdits.Enabled = _edits is not null && !_closing;
-        _deletePage.Enabled = _state?.PageCount > 1;
-        _moveEarlier.Enabled = _state?.CanGoPrevious == true;
-        _moveLater.Enabled = _state?.CanGoNext == true;
-        _undo.Enabled = _edits?.CanUndo == true;
-        _redo.Enabled = _edits?.CanRedo == true;
+        _pageEdits.Enabled = _edits is not null && !_closing && !_saving;
+        _deletePage.Enabled = !_saving && _state?.PageCount > 1;
+        _moveEarlier.Enabled = !_saving && _state?.CanGoPrevious == true;
+        _moveLater.Enabled = !_saving && _state?.CanGoNext == true;
+        _undo.Enabled = !_saving && _edits?.CanUndo == true;
+        _redo.Enabled = !_saving && _edits?.CanRedo == true;
+        _saveAs.Enabled = _edits is not null && !_closing && !_saving;
+        _open.Enabled = !_closing && !_saving;
         _thumbnails.SetRotation(_state?.Rotation ?? default);
         _displayMode.Enabled = _rotateLeft.Enabled = _rotateRight.Enabled = _state is not null;
         _singlePageMode.Checked = _state?.DisplayMode == ViewerDisplayMode.SinglePage;
@@ -362,6 +379,8 @@ internal sealed class MainForm : Form
     private void CloseDocument()
     {
         _edits = null;
+        _sourcePath = null;
+        _savedDocumentPath = null;
         _documentName = null;
         _outline.Clear();
         _renderer.CancelOutline();
@@ -390,14 +409,14 @@ internal sealed class MainForm : Form
 
     private void EditCurrent(Func<Core.Documents.DocumentPageId, DocumentEdit> createEdit)
     {
-        if (_edits is null || _state is null || _closing || _resourcesDisposed) return;
+        if (_edits is null || _state is null || _closing || _saving || _resourcesDisposed) return;
         EditedDocumentState before = _edits.State;
         if (_edits.Execute(createEdit(before.Pages[_state.PageIndex].Id))) RefreshEditedDocument(before);
     }
 
     private void ApplyHistory(bool undo)
     {
-        if (_edits is null || _state is null || _closing || _resourcesDisposed) return;
+        if (_edits is null || _state is null || _closing || _saving || _resourcesDisposed) return;
         EditedDocumentState before = _edits.State;
         if (undo ? _edits.Undo() : _edits.Redo()) RefreshEditedDocument(before);
     }
@@ -423,4 +442,65 @@ internal sealed class MainForm : Form
     }
 
     private void UpdateSidebarActivity() => _thumbnails.SetActive(!_split.Panel1Collapsed && _navigationTabs.SelectedIndex == 0);
+
+    private async Task ChooseSaveAsAsync()
+    {
+        if (_saving || _closing || _edits is null || _sourcePath is null) return;
+        using SaveFileDialog dialog = new()
+        {
+            AddExtension = true,
+            DefaultExt = "pdf",
+            Filter = "PDF documents (*.pdf)|*.pdf",
+            FileName = _savedDocumentPath is null ? Path.GetFileName(_sourcePath) : Path.GetFileName(_savedDocumentPath),
+            InitialDirectory = Path.GetDirectoryName(_savedDocumentPath ?? _sourcePath),
+            OverwritePrompt = true,
+            Title = "Save MauriPDF document as"
+        };
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        await SaveAsAsync(dialog.FileName);
+    }
+
+    private async Task SaveAsAsync(string destinationPath)
+    {
+        if (_saving || _closing || _edits is null || _sourcePath is null) return;
+        string destination;
+        try { destination = Path.GetFullPath(destinationPath); }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            ShowSaveError(exception);
+            return;
+        }
+        if (string.Equals(destination, _sourcePath, StringComparison.OrdinalIgnoreCase))
+        {
+            ShowSaveError(new IOException("Save As cannot overwrite the currently open source PDF. Choose a different file."));
+            return;
+        }
+
+        DocumentEditSession edits = _edits;
+        PdfMaterializationPlan snapshot = PdfMaterializationPlan.From(edits.State);
+        _saving = true;
+        _loading.Text = "Saving...";
+        UpdateToolbar();
+        try
+        {
+            PdfMaterializationResult result = await _materializer.MaterializeAsync(_sourcePath, destination, snapshot);
+            if (_resourcesDisposed || _closing || !ReferenceEquals(edits, _edits)) return;
+            edits.MarkSavedBaseline(snapshot.Revision);
+            _savedDocumentPath = destination;
+            _loading.Text = $"Saved {result.PageCount} pages as {Path.GetFileName(destination)}";
+        }
+        catch (Exception exception)
+        {
+            if (!_resourcesDisposed && !_closing) ShowSaveError(exception);
+        }
+        finally
+        {
+            _saving = false;
+            if (!_resourcesDisposed) UpdateToolbar();
+        }
+    }
+
+    private void ShowSaveError(Exception exception) => MessageBox.Show(this,
+        $"MauriPDF could not save the PDF.\n\n{exception.Message}", "MauriPDF",
+        MessageBoxButtons.OK, MessageBoxIcon.Error);
 }

@@ -1,6 +1,6 @@
 # Third-party notices
 
-MauriPDF is licensed under the GNU General Public License version 3. The following third-party components are used by the PDF rendering implementation and retain their own copyright and license terms.
+MauriPDF is licensed under the GNU General Public License version 3. The following third-party components are used by the PDF rendering and Save As implementations and retain their own copyright and license terms.
 
 ## PDFiumCore 154.0.8035
 

@@ -1,11 +1,12 @@
 using MauriPDF.Core.Rendering;
+using MauriPDF.Pdfium;
 using PDFiumCore;
 
 namespace MauriPDF.Rendering;
 
 public sealed class PdfiumRenderer : IPdfRenderer
 {
-    private IDisposable? _libraryLease = PdfiumLibraryLifetime.Acquire();
+    private IDisposable? _libraryLease = PdfiumRuntime.Acquire();
 
     public IPdfRenderSession Open(string filePath)
     {
@@ -18,7 +19,8 @@ public sealed class PdfiumRenderer : IPdfRenderer
             throw new FileNotFoundException("The PDF file was not found.", fullPath);
         }
 
-        IDisposable sessionLease = PdfiumLibraryLifetime.Acquire();
+        IDisposable sessionLease = PdfiumRuntime.Acquire();
+        using IDisposable nativeCall = PdfiumRuntime.Enter();
         FpdfDocumentT? document = null;
         try
         {

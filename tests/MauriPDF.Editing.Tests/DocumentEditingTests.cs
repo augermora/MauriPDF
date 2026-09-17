@@ -179,6 +179,54 @@ public sealed class DocumentEditingTests
         Assert.All(replacement.State.Pages, page => Assert.Equal(0, page.StructuralRotation.Degrees));
     }
 
+    [Fact]
+    public void SavedRevisionBecomesCleanAndUndoRedoCrossesThatBaseline()
+    {
+        DocumentEditSession edits = new(3);
+        edits.Execute(new DeletePageEdit(edits.State.Pages[1].Id));
+        long savedRevision = edits.State.Revision;
+        edits.MarkSavedBaseline(savedRevision);
+        Assert.False(edits.IsDirty);
+        Assert.True(edits.Undo());
+        Assert.True(edits.IsDirty);
+        Assert.True(edits.Redo());
+        Assert.False(edits.IsDirty);
+        edits.Execute(new RotatePageEdit(edits.State.Pages[0].Id, true));
+        Assert.True(edits.IsDirty);
+        edits.MarkSavedBaseline(edits.State.Revision);
+        Assert.False(edits.IsDirty);
+        Assert.Throws<InvalidOperationException>(() => edits.MarkSavedBaseline(savedRevision));
+    }
+
+    [Fact]
+    public void MaterializationPlanCopiesLogicalOrderAndStructuralRotationOnly()
+    {
+        DocumentEditSession edits = new(4);
+        DocumentPageId last = edits.State.Pages[3].Id;
+        edits.Execute(new MovePageEdit(last, 0));
+        edits.Execute(new DeletePageEdit(edits.State.Pages[2].Id));
+        edits.Execute(new RotatePageEdit(last, true));
+        ViewerState ignoredView = new ViewerState(3).RotateClockwise().RotateClockwise();
+        PdfMaterializationPlan plan = PdfMaterializationPlan.From(edits.State);
+        Assert.Equal([3, 0, 2], plan.Pages.Select(page => page.SourcePageIndex));
+        Assert.Equal([90, 0, 0], plan.Pages.Select(page => page.StructuralRotationDegrees));
+        Assert.Equal(180, ignoredView.Rotation.Degrees);
+        Assert.Equal(edits.State.Revision, plan.Revision);
+    }
+
+    [Fact]
+    public void LargeMaterializationPlanIsOnlyLinearLightweightMetadata()
+    {
+        DocumentEditSession edits = new(1001);
+        edits.Execute(new MovePageEdit(edits.State.Pages[^1].Id, 0));
+        edits.Execute(new DeletePageEdit(edits.State.Pages[501].Id));
+        PdfMaterializationPlan plan = PdfMaterializationPlan.From(edits.State);
+        Assert.Equal(1000, plan.Pages.Count);
+        Assert.Equal(1000, plan.Pages[0].SourcePageIndex);
+        Assert.Equal(0, plan.Pages[1].SourcePageIndex);
+        Assert.All(plan.Pages, page => Assert.Equal(0, page.StructuralRotationDegrees));
+    }
+
     [Theory]
     [InlineData(ViewerDisplayMode.Continuous)]
     [InlineData(ViewerDisplayMode.SinglePage)]

@@ -12,7 +12,7 @@ The independent application core. It has no project references and must not refe
 
 ### MauriPDF.Rendering
 
-The PDF rendering implementation boundary. It references Core and is the only project that references PDFiumCore. PDFiumCore and native PDFium handles are implementation details and must not appear in Core or App APIs.
+The PDF rendering implementation boundary. It references Core and the shared PDFium runtime. PDFiumCore and native PDFium handles are implementation details and must not appear in Core or App APIs.
 
 The selected rendering engine is PDFium, currently consumed through PDFiumCore 154.0.8035. A rendering session owns its PDFium document handle. Page and PDFium bitmap handles exist only for the duration of a render call and are closed before the call returns.
 
@@ -20,7 +20,11 @@ Rendered pixels cross the boundary as a Core `RenderedPage`: an owned, UI-neutra
 
 ### MauriPDF.Editing
 
-The in-memory page-structure editing boundary. It references Core and owns immutable `EditedDocumentState`, explicit page operations, logical/source mappings, bounded Undo/Redo, and dirty tracking. It performs no PDF I/O and references no PDF library. Core shares only neutral page identity/reference/rotation values with Rendering and App.
+The page-structure editing and materialization boundary. It references Core and the shared PDFium runtime; it owns immutable `EditedDocumentState`, explicit page operations, logical/source mappings, bounded Undo/Redo, dirty tracking, and the path-independent Save As writer contract/implementation. Concrete PDFium types never cross its public API. Core shares only neutral page identity/reference/rotation values with Rendering and App.
+
+### MauriPDF.Pdfium
+
+The minimal native implementation-support boundary. It has no project references and centralizes PDFiumCore process initialization/destruction plus the process-wide call gate required by PDFium's non-thread-safe API. Rendering and Editing reference it; App and Core do not. It owns no document/page handles.
 
 ### MauriPDF.Infrastructure
 
@@ -33,16 +37,16 @@ The WinForms executable and composition root. It references all production proje
 ## Dependency graph
 
 ```text
-MauriPDF.Core
-  ^        ^             ^
-  |        |             |
-Rendering  Editing  Infrastructure
-  ^        ^             ^
-  |        |             |
-  +--------+------App----+
+Core       Pdfium
+  ^          ^ ^
+  |          | |
+Rendering----+ +----Editing
+  ^                    ^
+  |                    |
+  +---------App--------+     Infrastructure -> Core
 ```
 
-Dependencies point toward Core. Core has no dependency on outer projects.
+Core has no dependencies. The shared native support project has no project dependency and exposes no PDFium type. There are no circular references.
 
 ## Resource and performance principles
 
@@ -94,7 +98,7 @@ Document replacement clears the App's layout/Bitmaps and invalidates main and th
 
 `RenderCacheKey` distinguishes source document identity, source page index, target width, target height and composed additional rotation. The existing **64 MiB LRU main neutral cache** and separate **8 MiB thumbnail cache** remain unchanged. They account for backing allocation capacity, not only visible pixels, and dispose on eviction, replacement, clear, or shutdown. A cache hit returns an independent caller-owned copy. A cacheable fresh render transfers the original neutral buffer to the cache and returns a copy. The App disposes copies after conversion; cache eviction cannot invalidate a displayed Bitmap. Target-size/orientation changes are different cache keys; equal dimensions at 0° and 180° never alias.
 
-Native page/bitmap handles remain scoped to a single render. The native bitmap is destroyed before unpinning its borrowed pixel buffer; the document handle belongs to the worker session. PDFiumCore remains solely within Rendering. No packages, cloud services, telemetry, or licensing changes were introduced.
+Native page/bitmap handles remain scoped to a single render. The native bitmap is destroyed before unpinning its borrowed pixel buffer; the document handle belongs to the worker session. PDFiumCore remains within the native implementation boundaries. No packages, cloud services, telemetry, or licensing changes were introduced.
 
 A 1,001-page document therefore has O(page count) dimension/layout storage, but only O(visible pages) render demand and bounded Bitmap/cache storage. Deterministic tests cover geometry for 1/100/1,001 pages, huge extents, mixed sizes, visible ranges/gaps, optional layout overscan, fit/anchor rules, rapid replacement of 1,000 foreground intents, cache reuse, and batch priority. A local WinForms smoke harness checks real control handles, painting and disposal using a render stand-in; it is not a substitute for interactive validation with complex real PDFs. Metadata scanning can delay initial display on very large/malformed PDFs, and UI-thread pixel-to-Bitmap conversion can still briefly pause for large images.
 
@@ -237,7 +241,7 @@ Main and thumbnail cache keys now include normalized additional rotation alongsi
 
 Tests cover normalization and both turn directions, all rotations/modes/fit variants, forward/inverse transforms, hit testing, rotated native glyph alignment, source-byte preservation, logical page/zoom state, boundary anchors, cache identity, stale raster disposal and 1,001-page bounded demand. Native integration classes share one xUnit collection so PDFium is never entered concurrently across them; fake-worker and pure tests can still run in parallel. The existing ignored WinForms harness exercises actual mouse handlers, backwards/multipage rotated selection, overlay pixels, copy reconstruction without touching the clipboard, active search highlights/navigation, outline/sidebar behavior, all rotations/modes/fit states, page/wheel semantics, document defaults and disposal on a 1,001-page stand-in.
 
-There is no Two Page/Facing mode or PDF persistence. Per-page in-memory structural rotation and logical editing are described below. Native work already executing cannot be interrupted; newer intent wins after it returns. Relayout and UI Bitmap copying are synchronous bounded presentation work; Continuous geometry rebuilds remain O(page count), and exact reading-point retention is constrained when a page fits inside the viewport. Existing imperfect PDF text ordering/glyph boxes and raster-budget resolution limits still apply. Interactive review with representative real PDFs remains advisable.
+There is no Two Page/Facing mode. Per-page structural rotation, logical editing, and Save As persistence are described below. Native work already executing cannot be interrupted; newer intent wins after it returns. Relayout and UI Bitmap copying are synchronous bounded presentation work; Continuous geometry rebuilds remain O(page count), and exact reading-point retention is constrained when a page fits inside the viewport. Existing imperfect PDF text ordering/glyph boxes and raster-budget resolution limits still apply. Interactive review with representative real PDFs remains advisable.
 
 ## PDF outline / bookmarks navigation
 
@@ -245,7 +249,7 @@ There is no Two Page/Facing mode or PDF persistence. Per-page in-memory structur
 
 After page dimensions have opened successfully and the viewer is initialized, App requests `PdfViewerRenderer.ExtractOutlineAsync()` once. One deduplicated/replaceable outline slot runs on the existing exclusive PDFium worker, below all pending visible raster and interactive text/search-geometry work. There is no synchronous outline extraction in a UI event, Paint, or scroll handler. A bounded whole-tree extraction is simpler than lazy subtree jobs; switching sidebar tabs never extracts it again.
 
-Core's `IPdfRenderSession.ExtractOutline()` returns a `PdfOutline` containing copied read-only `Roots` and `WasLimited`. Each immutable `PdfOutlineNode` contains only `Title`, nullable zero-based `PageIndex`, and copied read-only `Children`. A null destination is a visible, non-navigable item. These objects require no disposal and contain neither native pointers, drawing types, nor WinForms objects. There is no outline raster/cache, outline editing API, or new package. PDFiumCore remains version **154.0.8035**, isolated in Rendering; GPLv3 and existing dependency notices are unchanged.
+Core's `IPdfRenderSession.ExtractOutline()` returns a `PdfOutline` containing copied read-only `Roots` and `WasLimited`. Each immutable `PdfOutlineNode` contains only `Title`, nullable zero-based `PageIndex`, and copied read-only `Children`. A null destination is a visible, non-navigable item. These objects require no disposal and contain neither native pointers, drawing types, nor WinForms objects. There is no outline raster/cache, outline editing API, or new package. PDFiumCore remains version **154.0.8035**, shared only by the native implementation projects; GPLv3 and existing dependency notices are unchanged.
 
 ### PDFium APIs, traversal, and limits
 
@@ -277,15 +281,15 @@ Deterministic tests cover copied immutable hierarchy/order/Unicode, empty and nu
 
 ## Initial milestone scope
 
-`0.1-alpha.1` originally covered launching MauriPDF, opening a local PDF, reading its page count, rendering pages, page navigation, zoom, fit to width, and closing the document. Subsequent milestones added the viewer capabilities described above and the in-memory editing foundation below. PDF writing, annotations, forms and signatures remain deferred.
+`0.1-alpha.1` originally covered launching MauriPDF, opening a local PDF, reading its page count, rendering pages, page navigation, zoom, fit to width, and closing the document. Subsequent milestones added the viewer, logical editing, and Save As capabilities described below. Ordinary Save, annotations, forms editing and signatures remain deferred.
 
 ## Non-destructive logical page editing
 
 ### Immutable source and stable identity
 
-The source PDF session and original page metadata remain unchanged throughout edits. No PDF writing API, PDFium page-tree manipulation, temporary modified copy, Save/Save As, or writing library is used. Edits exist only in managed memory. PDFiumCore remains 154.0.8035 in Rendering; dependencies, GPLv3 and privacy guarantees are unchanged.
+The source PDF session and original page metadata remain unchanged throughout editing and Save As. Edits exist in managed memory until explicitly materialized to a different path. PDFiumCore remains 154.0.8035; dependencies, GPLv3 and privacy guarantees are unchanged.
 
-Core's `DocumentPageId` is `(SourceDocumentId: Guid, SourcePageIndex: int)`. A fresh opened document receives a new Guid; the source index never changes. `LogicalPageReference` adds a distinct `StructuralPageRotation` value to that identity. There is exactly one logical reference per retained source page, with no duplication or insertion. Logical index is merely its current position in `EditedDocumentState.Pages`, never its identity. A future writer can enumerate these references in order to obtain source document, source page and structural rotation without consulting UI state; no writer contract is needed yet.
+Core's `DocumentPageId` is `(SourceDocumentId: Guid, SourcePageIndex: int)`. A fresh opened document receives a new Guid; the source index never changes. `LogicalPageReference` adds a distinct `StructuralPageRotation` value to that identity. There is exactly one logical reference per retained source page, with no duplication or insertion. Logical index is merely its current position in `EditedDocumentState.Pages`, never its identity. `PdfMaterializationPlan` copies source index and structural rotation from this sequence without consulting UI state.
 
 Editing owns `EditedDocumentState`: a read-only array of lightweight references, revision ID and private stable-ID-to-logical-index map. `LogicalIndexForSource` returns null for a removed source page. Each transition creates a new array/map, leaving earlier snapshots immutable. For source A B C D E, moving E before B, deleting C and rotating D yields A E B D↻ while the source remains A B C D E.
 
@@ -297,7 +301,7 @@ Undo/Redo retains at most **100 total operations** across both stacks. Each entr
 
 Opening establishes revision 0 as the clean baseline. Each new edit receives a unique revision; Undo/Redo restores the recorded revision. `IsDirty` compares revision with baseline, not stack length. Undoing to revision 0 is clean; Redo is dirty. If history eviction makes the baseline unreachable, exhausting Undo remains dirty. Manually applying inverse new commands is a new revision and remains dirty even if its content happens to equal the original. `EditGeneration` is monotonic even when history revisions rewind. View-only rotation, zoom, scrolling, mode/sidebar changes, selection, search and navigation never change the edit revision.
 
-The Pages menu exposes current-page Delete, Earlier/Later, structural rotation, Undo and Redo with appropriate disabled states. Ctrl+Z/Y invoke document history except when a text editor owns focus. The title adds `*` when dirty. Closing/replacing offers only **Discard / Cancel**; Cancel is the default and preserves the live document/history. Discard releases state through existing replacement/shutdown ownership paths. New opens reset source identity, history, structural rotations and viewer defaults. No Save option is presented.
+The Pages menu exposes current-page Delete, Earlier/Later, structural rotation, Undo and Redo with appropriate disabled states. Ctrl+Z/Y invoke document history except when a text editor owns focus. The title adds `*` when dirty. Closing/replacing offers only **Discard / Cancel**; Cancel is the default and preserves the live document/history. Discard releases state through existing replacement/shutdown ownership paths. New opens reset source identity, history, structural rotations and viewer defaults. Save As is separate; ordinary Save is not presented.
 
 ### Shared geometry, source requests and rotation
 
@@ -323,4 +327,36 @@ Sequence changes immediately invalidate active search results/work and restart a
 
 Tests cover stable identity, mappings, transitions, bounds, original/dirty revisions, all 64 intrinsic/structural/visual quarter-turn combinations, layout/current-page behavior in both modes, source cache reuse and existing stale-worker disposal. The ignored WinForms harness extends actual UI validation with edit commands, search/selection/outline remapping, a gated pre-edit render completion, repeated Undo/Redo, logical thumbnails and both Discard/Cancel paths on 1,001 source pages. Metadata/maps remain O(page count), history O(100), and raster work O(bounded visible demand), not O(document pages).
 
-There is no persisted rotation, Save/Save As, page insertion/import, duplication, extraction/export, merge, multi-page edits, drag/drop reordering or annotations. Long histories cannot always return to the original baseline. Continuous geometry and immutable metadata rebuilding are synchronous O(page count); the 1,001-page checks do not establish a maximum practical document size or native memory/time guarantee. Real-world interactive review remains advisable.
+There is no ordinary Save, page insertion/import, duplication, extraction/export, merge, multi-page edits, drag/drop reordering or annotation editing. Long histories cannot always return to an older baseline after eviction. Continuous geometry and immutable metadata rebuilding are synchronous O(page count); the 1,001-page checks do not establish a maximum practical document size or native memory/time guarantee. Real-world interactive review remains advisable.
+
+## Save As materialization
+
+### Backend and boundary
+
+The installed PDFiumCore **154.0.8035** bindings already expose `FPDF_CreateNewDocument`, `FPDF_ImportPagesByIndex`, `FPDFPageGetRotation`, `FPDFPageSetRotation`, `FPDF_SaveAsCopy`, and custom `FPDF_FILEWRITE_`. PDFium's own tests exercise explicit-index page import. This is the smallest compatible backend and preserves PDF page objects rather than rendering them, so no PDFsharp or other package was added. PDFiumCore is Apache-2.0 and PDFium BSD-style, already covered by `THIRD-PARTY-NOTICES.md` and compatible with MauriPDF's GPLv3 distribution obligations.
+
+Editing owns the neutral `IPdfDocumentMaterializer`, immutable `PdfMaterializationPlan`, and `PdfiumDocumentMaterializer`. App only chooses a path, captures a plan, displays status, disables structural commands, and applies the successful baseline. No PDFiumCore type crosses Editing's public contract; Core and App still do not reference it. `MauriPDF.Pdfium` is a small implementation-support project shared by Rendering and Editing. It reference-counts process initialization and provides one re-entrant native-call gate because PDFium explicitly declares every public API non-thread-safe. Rendering remains responsible for viewing and Editing for materialization.
+
+### Physical page construction and rotation
+
+The plan is an immutable array of `(SourcePageIndex, StructuralRotationDegrees)` plus its edit revision. Viewer rotation is absent by construction. The materializer opens the immutable source independently, creates a new PDFium destination, and passes the complete logical source-index sequence once to `FPDF_ImportPagesByIndex`. Deleted pages are absent and moved pages are physically imported at their logical positions. This is O(page count) index/metadata work and PDF object copying; it does not render every page, populate viewer caches, or extract text.
+
+For each imported page, PDFium reports the copied intrinsic `/Rotate` as quarter turns. The writer stores `(imported intrinsic quarter-turns + structural quarter-turns) mod 4`. It does not use `ViewerState.Rotation`, and therefore does not double-apply or persist view-only rotation. The real-output fixture verifies 90/180/270 combinations, effective dimensions, reordered labels, text extraction and a rendered first page.
+
+`FPDF_ImportPagesByIndex` copies page dictionaries and referenced content/resources. Verified output retains selectable text, a Type 1 font/resource, vector path content, page dimensions/orientation and normal rendering; pages are never rasterized. This supports ordinary vector/text/image content and its referenced fonts/resources. Preservation of every page box, transparency/color profile, unusual font, image encoding, tagged-PDF structure, attachment, signature, JavaScript, form or annotation feature is **not guaranteed** by this milestone.
+
+The new destination catalog is intentionally not copied, so document metadata, outlines/bookmarks, named destinations, viewer preferences, document-level JavaScript, embedded files, AcroForm catalog state and signatures are omitted. Source outline navigation remains available in the open viewer but output tests verify that the source outline is absent. All imported link annotations are removed: PDFium's import API does not provide a documented guarantee that intra-document targets are remapped after arbitrary omit/reorder, and emitting a known-wrong target is worse than dropping the link. This also drops URI links. Other page annotations/widgets are left to PDFium's import behavior, but their appearance/interactivity and form association have not been verified and must not be claimed. Nothing is flattened deliberately.
+
+### Transaction, validation and ownership
+
+Save As rejects the canonical current `SourcePath` using Windows case-insensitive comparison. It creates a unique private-looking temporary sibling with `CreateNew`, imports and serializes using a 64 KiB sequential `FileStream`, flushes it to disk, and closes both PDFium documents and the callback wrapper. It then reopens the temporary file with PDFium, checks a sensible nonzero length, exact page count, finite positive dimensions for every output page, and loads/renders an 8×8 first page. Only validated output is moved over the selected destination on the same volume. The SaveFileDialog supplies normal overwrite confirmation. Failure before the move leaves an existing destination untouched and cleanup deletes the temporary file; cleanup after exceptional filesystem denial is best-effort.
+
+Source/destination documents, imported page handles, validation page/bitmap handles, write callback, streams, runtime leases and gate scopes have explicit `try/finally` or `using` ownership. No handle survives the operation. The source is opened read-only by PDFium and its bytes are regression-tested unchanged. The writer never invokes actions, JavaScript, URLs, embedded files or network access.
+
+### UI, snapshots and baseline
+
+Save As and Ctrl+Shift+S use a normal PDF-only SaveFileDialog with the source or last-output filename. Materialization runs on a background task. The viewer and read-only UI remain usable, but PDFium cache misses wait behind the process-wide gate while the native import/save/validation unit is running. Structural edits, Undo/Redo, duplicate Save As, source replacement and close are disabled/rejected during that unit so the immutable snapshot revision cannot diverge. Cancellation is not exposed in this first version; a queued task respects a supplied token before native work/final publication, but an active native call cannot be interrupted.
+
+On success the viewer deliberately remains backed by the original `SourcePath`; it is not reopened and its caches/session stay valid. `SavedDocumentPath` tracks the last successful output separately for the next dialog/future ordinary Save. `DocumentEditSession.MarkSavedBaseline` makes the captured current revision clean while retaining history: Undo away from it is dirty and Redo back to it is clean. Later edits are dirty and another successful Save As moves the baseline again. Failed validation/materialization never changes the path or baseline. Consequently clean close needs no warning, while Undo/new edits restore Discard/Cancel protection.
+
+Ordinary Save and in-place source replacement remain unsupported. Output catalog structures and links are deliberately conservative as described above; passwords are not prompted, signed output is not preserved as a valid signature, cancellation/progress percentage is absent, and an individual PDFium import/save call can monopolize the native gate. Large files are streamed through the writer callback, but PDFium controls internal object-copy memory and no hard memory bound is asserted. Future Save can reuse the same path-independent materializer and transactional publication, targeting the separately tracked saved path after an explicit product decision.

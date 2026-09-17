@@ -16,5 +16,6 @@
   <ItemGroup>
     <ProjectReference Include="../../src/MauriPDF.Core/MauriPDF.Core.csproj" />
     <ProjectReference Include="../../src/MauriPDF.Editing/MauriPDF.Editing.csproj" />
+    <ProjectReference Include="../../src/MauriPDF.Rendering/MauriPDF.Rendering.csproj" />
   </ItemGroup>
 </Project>

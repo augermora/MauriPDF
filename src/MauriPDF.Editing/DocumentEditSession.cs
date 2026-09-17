@@ -9,7 +9,7 @@ public sealed class DocumentEditSession
     private readonly List<Entry> _undo = [];
     private readonly List<Entry> _redo = [];
     private long _nextRevision;
-    private readonly long _baselineRevision;
+    private long _baselineRevision;
 
     public DocumentEditSession(int sourcePageCount)
     {
@@ -29,6 +29,12 @@ public sealed class DocumentEditSession
     public int RedoCount => _redo.Count;
     /// <summary>Monotonic invalidation version, unlike the history revision which rewinds on Undo.</summary>
     public long EditGeneration { get; private set; }
+
+    public void MarkSavedBaseline(long revision)
+    {
+        if (revision != State.Revision) throw new InvalidOperationException("Only the current edit snapshot can become the saved baseline.");
+        _baselineRevision = revision;
+    }
 
     public bool Execute(DocumentEdit edit)
     {

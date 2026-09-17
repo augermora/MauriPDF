@@ -1,6 +1,7 @@
 using System.Buffers;
 using MauriPDF.Core.Rendering;
 using MauriPDF.Core.Text;
+using MauriPDF.Pdfium;
 using PDFiumCore;
 
 namespace MauriPDF.Rendering;
@@ -22,10 +23,15 @@ internal sealed class PdfiumRenderSession : IPdfRenderSession
 
     public int PageCount { get; }
 
-    public Core.Outline.PdfOutline ExtractOutline() => new PdfiumOutlineReader(GetDocument(), PageCount).Read();
+    public Core.Outline.PdfOutline ExtractOutline()
+    {
+        using IDisposable nativeCall = PdfiumRuntime.Enter();
+        return new PdfiumOutlineReader(GetDocument(), PageCount).Read();
+    }
 
     public PdfTextPage ExtractText(int pageIndex)
     {
+        using IDisposable nativeCall = PdfiumRuntime.Enter();
         FpdfDocumentT document = GetDocument();
         ValidatePageIndex(pageIndex);
         FpdfPageT? page = fpdfview.FPDF_LoadPage(document, pageIndex);
@@ -89,6 +95,7 @@ internal sealed class PdfiumRenderSession : IPdfRenderSession
 
     public PdfPageSize GetPageSize(int pageIndex)
     {
+        using IDisposable nativeCall = PdfiumRuntime.Enter();
         FpdfDocumentT document = GetDocument();
         ValidatePageIndex(pageIndex);
 
@@ -106,6 +113,7 @@ internal sealed class PdfiumRenderSession : IPdfRenderSession
 
     public unsafe RenderedPage RenderPage(int pageIndex, int pixelWidth, int pixelHeight, Core.Viewing.VisualRotation rotation = default)
     {
+        using IDisposable nativeCall = PdfiumRuntime.Enter();
         FpdfDocumentT document = GetDocument();
         ValidatePageIndex(pageIndex);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(pixelWidth);
@@ -187,6 +195,7 @@ internal sealed class PdfiumRenderSession : IPdfRenderSession
 
     public void Dispose()
     {
+        using IDisposable nativeCall = PdfiumRuntime.Enter();
         try
         {
             if (_document is not null)

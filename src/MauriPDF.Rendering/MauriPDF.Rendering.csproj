@@ -9,5 +9,6 @@
 
   <ItemGroup>
     <ProjectReference Include="../MauriPDF.Core/MauriPDF.Core.csproj" />
+    <ProjectReference Include="../MauriPDF.Pdfium/MauriPDF.Pdfium.csproj" />
   </ItemGroup>
 </Project>
