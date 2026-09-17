@@ -1,5 +1,6 @@
 using System.Globalization;
 using MauriPDF.Rendering;
+using MauriPDF.Core.Documents;
 
 namespace MauriPDF.App;
 
@@ -24,6 +25,7 @@ internal sealed class ThumbnailListView : ListView
     private bool _ready;
     private bool _disposed;
     private Core.Viewing.VisualRotation _rotation;
+    private IReadOnlyList<LogicalPageReference>? _logicalPages;
 
     public ThumbnailListView(PdfViewerRenderer renderer)
     {
@@ -46,8 +48,9 @@ internal sealed class ThumbnailListView : ListView
 
     public event Action<int>? PageRequested;
 
-    public void SetDocument(int pageCount)
+    public void SetDocument(int pageCount, IReadOnlyList<LogicalPageReference>? logicalPages = null)
     {
+        _logicalPages = logicalPages;
         _rotation = default;
         CancelGeneration();
         ClearImages();
@@ -63,6 +66,36 @@ internal sealed class ThumbnailListView : ListView
         _lastTop = _lastCount = -1;
         Invalidate();
         CheckVisibleRange();
+    }
+
+    public void ApplyEditedPages(IReadOnlyList<LogicalPageReference> pages)
+    {
+        CancelGeneration();
+        Dictionary<DocumentPageId, int> positions = new(pages.Count);
+        for (int index = 0; index < pages.Count; index++) positions.Add(pages[index].Id, index);
+        Dictionary<int, Bitmap> retained = [];
+        foreach ((int oldIndex, Bitmap image) in _images)
+        {
+            if (_logicalPages is not null && positions.TryGetValue(_logicalPages[oldIndex].Id, out int newIndex)
+                && _logicalPages[oldIndex].StructuralRotation == pages[newIndex].StructuralRotation)
+                retained.Add(newIndex, image);
+            else image.Dispose();
+        }
+        _images.Clear(); // Ownership of compatible Bitmaps moves, without cloning or disposal.
+        foreach ((int index, Bitmap image) in retained) _images.Add(index, image);
+        _logicalPages = pages;
+        _failed.Clear();
+        _current = -1;
+        _selecting = true;
+        try
+        {
+            SelectedIndices.Clear();
+            VirtualListSize = pages.Count;
+        }
+        finally { _selecting = false; }
+        _lastTop = _lastCount = -1;
+        CheckVisibleRange(); // Drops retained images which moved outside the bounded visible range.
+        Invalidate();
     }
 
     public void SetActive(bool active)
@@ -182,7 +215,9 @@ internal sealed class ThumbnailListView : ListView
             if (_images.ContainsKey(index) || _failed.Contains(index)) continue;
             try
             {
-                if (!_renderer.TryRequestThumbnail(index, out Task<ViewerRenderResult>? task, _rotation)) continue;
+                int sourceIndex = _logicalPages?[index].SourcePageIndex ?? index;
+                var rotation = _logicalPages?[index].DisplayRotation(_rotation) ?? _rotation;
+                if (!_renderer.TryRequestThumbnail(sourceIndex, out Task<ViewerRenderResult>? task, rotation)) continue;
                 using ViewerRenderResult result = await task!;
                 if (_disposed || !_active || generation != _generation) return;
                 Bitmap bitmap = WinFormsImageConverter.CreateBitmap(result.Pixels);

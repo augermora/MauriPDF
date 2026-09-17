@@ -784,6 +784,32 @@ public sealed class PdfViewerRendererTests
         finally { engine.Release.Set(); }
     }
 
+    [Fact]
+    public async Task LogicalPageMovesReuseSourceRastersAndSourceText()
+    {
+        FakeEngine engine = new();
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenAsync("source");
+        Core.Documents.LogicalPageReference page = new(new(Guid.NewGuid(), 4), new(90));
+        PageRenderTarget request = PageRenderTarget.FromLogicalPage(page, new(96, 96), new(90));
+        Assert.Equal(4, request.PageIndex);
+        Assert.Equal(180, request.Rotation.Degrees);
+        using ViewerRenderResult first = await viewer.RenderVisible([request])[0];
+        var text = await viewer.ExtractTextAsync(page.SourcePageIndex);
+        // Logical position changed; the source identity and rendering parameters did not.
+        viewer.CancelVisible();
+        using ViewerRenderResult moved = await viewer.RenderVisible([PageRenderTarget.FromLogicalPage(page, new(96, 96), new(90))])[0];
+        Assert.True(moved.FromCache);
+        Assert.Same(text, await viewer.ExtractTextAsync(page.SourcePageIndex));
+        Assert.Equal(1, engine.RenderCount);
+        Assert.Equal(1, engine.TextCount);
+        Assert.Equal(0, engine.ClosedDocuments);
+        using ViewerRenderResult rotated = await viewer.RenderVisible([PageRenderTarget.FromLogicalPage(
+            page with { StructuralRotation = new(180) }, new(96, 96), new(90))])[0];
+        Assert.False(rotated.FromCache);
+        Assert.Equal(2, engine.RenderCount);
+    }
+
     private sealed class FakeEngine : IPdfRenderer
     {
         public bool BlockOutline { get; init; }

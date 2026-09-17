@@ -56,7 +56,7 @@ internal sealed class OutlineView : UserControl
         TreeNode result = new(node.Title)
         {
             Tag = node,
-            ToolTipText = node.PageIndex is int page ? $"Page {page + 1}" : "No supported local destination"
+            ToolTipText = node.PageIndex is int page ? $"Source page {page + 1}" : "No supported local destination"
         };
         foreach (PdfOutlineNode child in node.Children) result.Nodes.Add(CreateNode(child));
         return result;

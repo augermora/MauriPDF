@@ -42,6 +42,12 @@ public sealed record ViewerState
     public bool CanGoPrevious => PageIndex > 0;
     public bool CanGoNext => PageIndex < PageCount - 1;
 
+    public ViewerState RemapPages(int pageCount, int currentIndex) => new ViewerState(pageCount)
+    {
+        PageIndex = Math.Clamp(currentIndex, 0, pageCount - 1), ZoomPercent = ZoomPercent,
+        ZoomMode = ZoomMode, DisplayMode = DisplayMode, Rotation = Rotation
+    };
+
     public ViewerState GoToPage(int pageNumber) => this with
     {
         PageIndex = Math.Clamp(pageNumber, 1, PageCount) - 1

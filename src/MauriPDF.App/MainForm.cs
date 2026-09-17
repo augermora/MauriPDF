@@ -1,6 +1,7 @@
 using System.Globalization;
 using MauriPDF.Core.Viewing;
 using MauriPDF.Rendering;
+using MauriPDF.Editing;
 
 namespace MauriPDF.App;
 
@@ -34,6 +35,16 @@ internal sealed class MainForm : Form
     private readonly ToolStripButton _rotateRight = new("↷") { ToolTipText = "Rotate clockwise 90° (view only)", AccessibleName = "Rotate clockwise" };
     private readonly ContinuousPdfView _viewport;
     private readonly DocumentSearchBar _searchBar;
+    private DocumentEditSession? _edits;
+    private string? _documentName;
+    private readonly ToolStripDropDownButton _pageEdits = new("Pages");
+    private readonly ToolStripMenuItem _deletePage = new("Delete current page");
+    private readonly ToolStripMenuItem _moveEarlier = new("Move page earlier");
+    private readonly ToolStripMenuItem _moveLater = new("Move page later");
+    private readonly ToolStripMenuItem _rotatePageClockwise = new("Rotate page clockwise (edit)");
+    private readonly ToolStripMenuItem _rotatePageCounterClockwise = new("Rotate page counter-clockwise (edit)");
+    private readonly ToolStripMenuItem _undo = new("Undo") { ShortcutKeyDisplayString = "Ctrl+Z" };
+    private readonly ToolStripMenuItem _redo = new("Redo") { ShortcutKeyDisplayString = "Ctrl+Y" };
     private ViewerState? _state;
     private long _requestId;
     private bool _resourcesDisposed;
@@ -56,8 +67,9 @@ internal sealed class MainForm : Form
         _thumbnails.PageRequested += index => ChangeState(_state?.GoToPage(index + 1), navigate: true);
         _outline.PageRequested += index =>
         {
-            if (_state is not null && index < _state.PageCount)
-                ChangeState(_state.GoToPage(index + 1), navigate: true, focusViewport: false);
+            int? logical = _edits is null ? index : _edits.State.LogicalIndexForSource(index);
+            if (_state is not null && logical.HasValue && logical.Value < _state.PageCount)
+                ChangeState(_state.GoToPage(logical.Value + 1), navigate: true, focusViewport: false);
         };
         _toggleThumbnails.Click += (_, _) => ToggleThumbnails();
         Text = "MauriPDF";
@@ -78,13 +90,22 @@ internal sealed class MainForm : Form
         _singlePageMode.Click += (_, _) => ChangeState(_state?.SetDisplayMode(ViewerDisplayMode.SinglePage));
         _rotateLeft.Click += (_, _) => ChangeState(_state?.RotateCounterClockwise());
         _rotateRight.Click += (_, _) => ChangeState(_state?.RotateClockwise());
+        _pageEdits.DropDownItems.AddRange([_deletePage, _moveEarlier, _moveLater, _rotatePageClockwise,
+            _rotatePageCounterClockwise, new ToolStripSeparator(), _undo, _redo]);
+        _deletePage.Click += (_, _) => EditCurrent(id => new DeletePageEdit(id));
+        _moveEarlier.Click += (_, _) => EditCurrent(id => new MovePageEdit(id, _state!.PageIndex - 1));
+        _moveLater.Click += (_, _) => EditCurrent(id => new MovePageEdit(id, _state!.PageIndex + 1));
+        _rotatePageClockwise.Click += (_, _) => EditCurrent(id => new RotatePageEdit(id, true));
+        _rotatePageCounterClockwise.Click += (_, _) => EditCurrent(id => new RotatePageEdit(id, false));
+        _undo.Click += (_, _) => ApplyHistory(undo: true);
+        _redo.Click += (_, _) => ApplyHistory(undo: false);
         _pageNumber.KeyDown += PageNumber_KeyDown;
         _pageNumber.Leave += (_, _) => UpdateToolbar();
         ToolStrip toolbar = new() { GripStyle = ToolStripGripStyle.Hidden };
         toolbar.Items.AddRange([
             open, _toggleThumbnails, new ToolStripSeparator(), _previous, _pageNumber, _totalPages, _next,
             new ToolStripSeparator(), _zoomOut, _resetZoom, _zoomIn, _zoomLabel, _fitPage, _fitWidth,
-            _displayMode, _rotateLeft, _rotateRight, _loading
+            _displayMode, _rotateLeft, _rotateRight, _pageEdits, _loading
         ]);
         TabPage thumbnailsTab = new("Thumbnails");
         thumbnailsTab.Controls.Add(_thumbnails);
@@ -117,6 +138,12 @@ internal sealed class MainForm : Form
         }
 
         if (_searchBar.QueryFocused) return base.ProcessCmdKey(ref msg, keyData);
+
+        if (!_pageNumber.Focused && keyData is (Keys.Control | Keys.Z) or (Keys.Control | Keys.Y))
+        {
+            ApplyHistory(undo: keyData == (Keys.Control | Keys.Z));
+            return true;
+        }
 
         // Preserve normal cursor movement and Home/End while editing the page number.
         if (keyData == (Keys.Control | Keys.C) && !_pageNumber.Focused)
@@ -178,6 +205,7 @@ internal sealed class MainForm : Form
         if (_shutdownComplete || e.Cancel) return;
         e.Cancel = true;
         if (_closing) return;
+        if (!ConfirmDiscardChanges()) return;
         _closing = true;
         _outline.Clear();
         _renderer.CancelOutline();
@@ -217,23 +245,30 @@ internal sealed class MainForm : Form
             return;
         }
 
+        await OpenDocumentAsync(dialog.FileName);
+    }
+
+    private async Task OpenDocumentAsync(string path)
+    {
+        if (_closing || !ConfirmDiscardChanges()) return;
         CloseDocument();
         long requestId = ++_requestId;
         _loading.Text = "Opening...";
         try
         {
-            var pages = await _renderer.OpenDocumentAsync(dialog.FileName);
+            var pages = await _renderer.OpenDocumentAsync(path);
             if (_resourcesDisposed || requestId != _requestId)
             {
                 return;
             }
 
-            Text = $"MauriPDF — {Path.GetFileName(dialog.FileName)}";
+            _documentName = Path.GetFileName(path);
             _loading.Text = string.Empty;
             _state = new ViewerState(pages.Count);
+            _edits = new DocumentEditSession(pages.Count);
             _searchBar.SetDocument(pages.Count);
-            _viewport.SetDocument(pages);
-            _thumbnails.SetDocument(pages.Count);
+            _viewport.SetDocument(pages, _edits.State.Pages);
+            _thumbnails.SetDocument(pages.Count, _edits.State.Pages);
             UpdateToolbar();
             await LoadOutlineAsync(requestId);
         }
@@ -298,6 +333,13 @@ internal sealed class MainForm : Form
 
     private void UpdateToolbar()
     {
+        Text = _documentName is null ? "MauriPDF" : $"MauriPDF — {_documentName}{(_edits?.IsDirty == true ? " *" : "")}";
+        _pageEdits.Enabled = _edits is not null && !_closing;
+        _deletePage.Enabled = _state?.PageCount > 1;
+        _moveEarlier.Enabled = _state?.CanGoPrevious == true;
+        _moveLater.Enabled = _state?.CanGoNext == true;
+        _undo.Enabled = _edits?.CanUndo == true;
+        _redo.Enabled = _edits?.CanRedo == true;
         _thumbnails.SetRotation(_state?.Rotation ?? default);
         _displayMode.Enabled = _rotateLeft.Enabled = _rotateRight.Enabled = _state is not null;
         _singlePageMode.Checked = _state?.DisplayMode == ViewerDisplayMode.SinglePage;
@@ -319,6 +361,8 @@ internal sealed class MainForm : Form
 
     private void CloseDocument()
     {
+        _edits = null;
+        _documentName = null;
         _outline.Clear();
         _renderer.CancelOutline();
         _searchBar.SetDocument(0);
@@ -335,6 +379,39 @@ internal sealed class MainForm : Form
     {
         MessageBox.Show(this, $"MauriPDF could not open or render this page.\n\n{exception.Message}",
             "MauriPDF", MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
+
+    private bool ConfirmDiscardChanges()
+    {
+        if (_edits?.IsDirty != true) return true;
+        using DiscardChangesDialog dialog = new();
+        return dialog.ShowDialog(this) == DialogResult.OK;
+    }
+
+    private void EditCurrent(Func<Core.Documents.DocumentPageId, DocumentEdit> createEdit)
+    {
+        if (_edits is null || _state is null || _closing || _resourcesDisposed) return;
+        EditedDocumentState before = _edits.State;
+        if (_edits.Execute(createEdit(before.Pages[_state.PageIndex].Id))) RefreshEditedDocument(before);
+    }
+
+    private void ApplyHistory(bool undo)
+    {
+        if (_edits is null || _state is null || _closing || _resourcesDisposed) return;
+        EditedDocumentState before = _edits.State;
+        if (undo ? _edits.Undo() : _edits.Redo()) RefreshEditedDocument(before);
+    }
+
+    private void RefreshEditedDocument(EditedDocumentState before)
+    {
+        EditedDocumentState edited = _edits!.State;
+        int current = edited.ResolveCurrentPage(before, _state!.PageIndex);
+        bool sequenceChanged = !edited.HasSameSequence(before);
+        _state = _state.RemapPages(edited.Pages.Count, current);
+        if (sequenceChanged) _searchBar.PageSequenceChanged(edited.Pages.Count);
+        _thumbnails.ApplyEditedPages(edited.Pages);
+        _viewport.ApplyEditedPages(edited.Pages, _state, sequenceChanged);
+        UpdateToolbar();
     }
 
     private void ToggleThumbnails()

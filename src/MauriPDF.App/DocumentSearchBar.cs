@@ -18,6 +18,7 @@ internal sealed class DocumentSearchBar : ToolStrip
     private long _intent;
     private long _workerGeneration;
     private bool _disposed;
+    private bool _activateFirstResult = true;
 
     public DocumentSearchBar(PdfViewerRenderer renderer, ContinuousPdfView view)
     {
@@ -57,6 +58,12 @@ internal sealed class DocumentSearchBar : ToolStrip
         _pageCount = pageCount;
     }
 
+    public void PageSequenceChanged(int pageCount)
+    {
+        _pageCount = pageCount;
+        QueryChanged(activateFirstResult: false); // Reindex without stealing the stable current page after an edit.
+    }
+
     public void CloseSearch()
     {
         CancelCurrent();
@@ -77,9 +84,10 @@ internal sealed class DocumentSearchBar : ToolStrip
         _next.Enabled = _previous.Enabled = false;
     }
 
-    private void QueryChanged()
+    private void QueryChanged(bool activateFirstResult = true)
     {
         if (_disposed) return;
+        _activateFirstResult = activateFirstResult;
         CancelCurrent(); // Invalidate on the keystroke, not at the end of debounce.
         if (Visible && _pageCount > 0 && _query.TextLength > 0) _debounce.Start();
     }
@@ -88,6 +96,7 @@ internal sealed class DocumentSearchBar : ToolStrip
     {
         if (_disposed || !Visible || _pageCount == 0 || _query.TextLength == 0) return;
         long intent = _intent;
+        bool activateFirstResult = _activateFirstResult;
         DocumentSearchState state = new(_query.Text, _pageCount);
         _state = state;
         _workerGeneration = _renderer.BeginSearch();
@@ -104,7 +113,9 @@ internal sealed class DocumentSearchBar : ToolStrip
                 PageSearchResult result;
                 try
                 {
-                    result = await _renderer.SearchPageAsync(generation, page, state.Query, DocumentSearchState.MaximumResults - state.Count);
+                    result = await _renderer.SearchPageAsync(generation, _view.SourcePageIndex(page), state.Query, DocumentSearchState.MaximumResults - state.Count);
+                    // Worker results are source-indexed; the search index and ordering are logical.
+                    result = new(result.Matches.Select(match => match with { PageIndex = page }).ToArray(), result.Truncated);
                 }
                 catch (OperationCanceledException) { return; }
                 catch (Exception)
@@ -116,7 +127,7 @@ internal sealed class DocumentSearchBar : ToolStrip
                 if (_disposed || intent != _intent) return;
                 bool first = state.Count == 0;
                 state.Append(page, result, failed);
-                if (first && state.Count > 0) { Publish(); _view.ActivateSearchMatch(); }
+                if (first && state.Count > 0) { Publish(); if (activateFirstResult) _view.ActivateSearchMatch(); }
             }
         }
         finally

@@ -71,7 +71,7 @@ internal sealed partial class ContinuousPdfView
             {
                 try
                 {
-                    PdfTextPage text = await _renderer.SearchGeometryAsync(workerGeneration, page);
+                    PdfTextPage text = await _renderer.SearchGeometryAsync(workerGeneration, SourcePageIndex(page));
                     if (_disposed || generation != _searchViewGeneration) return;
                     // Separate UI reference bound, not a second document-wide geometry cache.
                     if (_searchPages.Values.Sum(value => value.Count) + text.Count > TextSelection.MaximumCharacters)
@@ -107,7 +107,7 @@ internal sealed partial class ContinuousPdfView
         {
             TextBounds box = text[index].Bounds;
             if (!box.HasArea) continue;
-            TextPoint center = _layout.Rotation.ToDisplay(new((box.Left + box.Right) / 2, (box.Top + box.Bottom) / 2));
+            TextPoint center = _layout.RotationForPage(match.PageIndex).ToDisplay(new((box.Left + box.Right) / 2, (box.Top + box.Bottom) / 2));
             double x = _layout.Left(match.PageIndex, ViewWidth) + center.X * page.Width;
             double y = page.Top + center.Y * page.Height;
             bool comfortable = x >= _left + ViewWidth * .15 && x <= _left + ViewWidth * .85
@@ -130,7 +130,7 @@ internal sealed partial class ContinuousPdfView
             {
                 TextBounds box = text[index].Bounds;
                 if (!box.HasArea || text[index].Unicode is 0 or 10 or 13) continue;
-                TextBounds mapped = TextCoordinateTransform.ToDisplay(box, display.Left, display.Top, display.Width, display.Height, _layout!.Rotation);
+                TextBounds mapped = TextCoordinateTransform.ToDisplay(box, display.Left, display.Top, display.Width, display.Height, _layout!.RotationForPage(page));
                 graphics.FillRectangle(brush, (float)mapped.Left, (float)mapped.Top,
                     (float)(mapped.Right - mapped.Left), (float)(mapped.Bottom - mapped.Top));
             }

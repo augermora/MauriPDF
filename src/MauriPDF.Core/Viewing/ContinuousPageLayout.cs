@@ -1,4 +1,5 @@
 using MauriPDF.Core.Rendering;
+using MauriPDF.Core.Documents;
 
 namespace MauriPDF.Core.Viewing;
 
@@ -20,26 +21,29 @@ public sealed class ContinuousPageLayout
     public const int Gap = 16;
     private readonly PageGeometry[] _pages;
     private readonly int _firstPage;
+    private readonly IReadOnlyList<LogicalPageReference>? _logicalPages;
     public VisualRotation Rotation { get; }
     public ViewerDisplayMode DisplayMode { get; }
 
-    public ContinuousPageLayout(IReadOnlyList<PdfPageSize> pages, ViewerState state, int width, int height)
+    public ContinuousPageLayout(IReadOnlyList<PdfPageSize> pages, ViewerState state, int width, int height,
+        IReadOnlyList<LogicalPageReference>? logicalPages = null)
     {
         ArgumentNullException.ThrowIfNull(pages);
-        if (pages.Count != state.PageCount) throw new ArgumentException("Page count mismatch.", nameof(pages));
+        if ((logicalPages?.Count ?? pages.Count) != state.PageCount) throw new ArgumentException("Page count mismatch.", nameof(pages));
+        _logicalPages = logicalPages;
         int availableWidth = Math.Max(1, width - 2 * Gap);
         int availableHeight = Math.Max(1, height - 2 * Gap);
         Rotation = state.Rotation;
         DisplayMode = state.DisplayMode;
         _firstPage = DisplayMode == ViewerDisplayMode.SinglePage ? state.PageIndex : 0;
-        PdfPageSize reference = Rotation.EffectiveSize(pages[state.PageIndex]);
+        PdfPageSize reference = RotationForPage(state.PageIndex).EffectiveSize(pages[SourcePageIndex(state.PageIndex)]);
         double fitScale = Math.Min(availableWidth / reference.WidthPoints, availableHeight / reference.HeightPoints);
-        _pages = new PageGeometry[DisplayMode == ViewerDisplayMode.SinglePage ? 1 : pages.Count];
+        _pages = new PageGeometry[DisplayMode == ViewerDisplayMode.SinglePage ? 1 : state.PageCount];
         double top = Gap;
         for (int offset = 0; offset < _pages.Length; offset++)
         {
             int index = _firstPage + offset;
-            PdfPageSize page = Rotation.EffectiveSize(pages[index]);
+            PdfPageSize page = RotationForPage(index).EffectiveSize(pages[SourcePageIndex(index)]);
             if (!double.IsFinite(page.WidthPoints) || !double.IsFinite(page.HeightPoints)
                 || page.WidthPoints <= 0 || page.HeightPoints <= 0) throw new ArgumentOutOfRangeException(nameof(pages));
             double scale = state.ZoomMode switch
@@ -59,6 +63,8 @@ public sealed class ContinuousPageLayout
     }
 
     public int Count => _pages.Length;
+    public int SourcePageIndex(int logicalIndex) => _logicalPages?[logicalIndex].SourcePageIndex ?? logicalIndex;
+    public VisualRotation RotationForPage(int logicalIndex) => _logicalPages?[logicalIndex].DisplayRotation(Rotation) ?? Rotation;
     public double Width { get; }
     public double Height { get; }
     public bool ContainsPage(int index) => index >= _firstPage && index < _firstPage + Count;
@@ -103,16 +109,16 @@ public sealed class ContinuousPageLayout
         int index = CurrentPage(top, viewportHeight);
         double x = viewportWidth == 0 ? .5 : Math.Clamp((left + viewportWidth / 2 - Left(index, viewportWidth)) / this[index].Width, 0, 1);
         double y = Math.Clamp((top + viewportHeight / 2 - this[index].Top) / this[index].Height, 0, 1);
-        var neutral = Rotation.ToPage(new(x, y));
+        var neutral = RotationForPage(index).ToPage(new(x, y));
         return new(index, neutral.Y, neutral.X);
     }
 
     public double RestoreAnchor(ReadingAnchor anchor, double viewportHeight) =>
-        Math.Clamp(this[anchor.PageIndex].Top + this[anchor.PageIndex].Height * Rotation.ToDisplay(new(anchor.HorizontalFraction, anchor.Fraction)).Y - viewportHeight / 2,
+        Math.Clamp(this[anchor.PageIndex].Top + this[anchor.PageIndex].Height * RotationForPage(anchor.PageIndex).ToDisplay(new(anchor.HorizontalFraction, anchor.Fraction)).Y - viewportHeight / 2,
             MinimumScrollTop(viewportHeight), MaximumScrollTop(viewportHeight));
 
     public double RestoreHorizontalAnchor(ReadingAnchor anchor, double viewportWidth) =>
-        Math.Clamp(Left(anchor.PageIndex, viewportWidth) + this[anchor.PageIndex].Width * Rotation.ToDisplay(new(anchor.HorizontalFraction, anchor.Fraction)).X - viewportWidth / 2,
+        Math.Clamp(Left(anchor.PageIndex, viewportWidth) + this[anchor.PageIndex].Width * RotationForPage(anchor.PageIndex).ToDisplay(new(anchor.HorizontalFraction, anchor.Fraction)).X - viewportWidth / 2,
             0, Math.Max(0, Width - viewportWidth));
 
     private int LowerBound(double position, bool bottom)

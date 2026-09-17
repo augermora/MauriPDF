@@ -1,6 +1,7 @@
 using MauriPDF.Core.Rendering;
 using MauriPDF.Core.Viewing;
 using MauriPDF.Rendering;
+using MauriPDF.Core.Documents;
 
 namespace MauriPDF.App;
 
@@ -16,6 +17,7 @@ internal sealed partial class ContinuousPdfView : Control
     private readonly Dictionary<int, Bitmap> _images = [];
     private readonly HashSet<int> _failed = [];
     private IReadOnlyList<PdfPageSize>? _sizes;
+    private IReadOnlyList<LogicalPageReference>? _logicalPages;
     private ViewerState? _state;
     private ContinuousPageLayout? _layout;
     private PageRange _range = new(0, -1);
@@ -63,7 +65,7 @@ internal sealed partial class ContinuousPdfView : Control
     private double MaxTop => _layout?.MaximumScrollTop(ViewHeight) ?? 0;
     private double MaxLeft => Math.Max(0, (_layout?.Width ?? 0) - ViewWidth);
 
-    public void SetDocument(IReadOnlyList<PdfPageSize>? sizes)
+    public void SetDocument(IReadOnlyList<PdfPageSize>? sizes, IReadOnlyList<LogicalPageReference>? logicalPages = null)
     {
         SetSearch(null, 0);
         ClearSelection();
@@ -72,11 +74,30 @@ internal sealed partial class ContinuousPdfView : Control
         ClearImages();
         _failed.Clear();
         _sizes = sizes;
-        _state = sizes is { Count: > 0 } ? new ViewerState(sizes.Count) : null;
+        _logicalPages = logicalPages;
+        _state = sizes is { Count: > 0 } ? new ViewerState(logicalPages?.Count ?? sizes.Count) : null;
         _layout = null;
         _range = new(0, -1);
         _top = _left = 0;
         RebuildLayout();
+    }
+
+    public int SourcePageIndex(int logicalIndex) => _logicalPages?[logicalIndex].SourcePageIndex ?? logicalIndex;
+
+    public void ApplyEditedPages(IReadOnlyList<LogicalPageReference> pages, ViewerState state, bool sequenceChanged)
+    {
+        // Capture against the OLD layout; remap the anchor to the stable current page's NEW index.
+        ReadingAnchor? anchor = _layout?.CaptureAnchor(_top, _layoutViewportHeight, _left, _layoutViewportWidth);
+        if (anchor.HasValue) anchor = anchor.Value with { PageIndex = state.PageIndex };
+        _draggingText = false;
+        Capture = false;
+        if (sequenceChanged) ClearSelection();
+        CancelDemand();
+        ClearImages();
+        _logicalPages = pages;
+        _state = state;
+        _searchNavigation = null;
+        RebuildLayout(anchor);
     }
 
     public void ApplyState(ViewerState state, bool navigate = false, bool refit = false)
@@ -122,14 +143,14 @@ internal sealed partial class ContinuousPdfView : Control
         MoveTo(_top + direction * 48, _left);
     }
 
-    private void RebuildLayout()
+    private void RebuildLayout(ReadingAnchor? editedAnchor = null)
     {
         if (!_ready || _disposed) return;
-        ReadingAnchor? anchor = _layout?.CaptureAnchor(_top, _layoutViewportHeight, _left, _layoutViewportWidth);
+        ReadingAnchor? anchor = editedAnchor ?? _layout?.CaptureAnchor(_top, _layoutViewportHeight, _left, _layoutViewportWidth);
         try
         {
             ContinuousPageLayout? next = _sizes is not null && _state is not null
-                ? new ContinuousPageLayout(_sizes, _state, ViewWidth, ViewHeight) : null;
+                ? new ContinuousPageLayout(_sizes, _state, ViewWidth, ViewHeight, _logicalPages) : null;
             CancelDemand();
             _failed.Clear();
             _layout = next;
@@ -215,18 +236,23 @@ internal sealed partial class ContinuousPdfView : Control
     private void LoadVisible()
     {
         if (_layout is null || _disposed) return;
-        List<PageRenderTarget> targets = [];
+        List<(int LogicalIndex, PageRenderTarget Request)> targets = [];
         for (int index = _range.First; index <= _range.Last; index++)
         {
             if (!_images.ContainsKey(index) && !_failed.Contains(index))
-                targets.Add(new(index, VisiblePageDemand.Target(_layout[index], _range.Count), _state!.Rotation));
+            {
+                RenderSize size = VisiblePageDemand.Target(_layout[index], _range.Count);
+                PageRenderTarget request = _logicalPages is null ? new(index, size, _state!.Rotation)
+                    : PageRenderTarget.FromLogicalPage(_logicalPages[index], size, _state!.Rotation);
+                targets.Add((index, request));
+            }
         }
         if (targets.Count == 0) return;
         int current = _layout.CurrentPage(_top, ViewHeight);
-        targets.Sort((a, b) => Math.Abs(a.PageIndex - current).CompareTo(Math.Abs(b.PageIndex - current)));
+        targets.Sort((a, b) => Math.Abs(a.LogicalIndex - current).CompareTo(Math.Abs(b.LogicalIndex - current)));
         long generation = _generation;
-        IReadOnlyList<Task<ViewerRenderResult>> tasks = _renderer.RenderVisible(targets);
-        for (int index = 0; index < tasks.Count; index++) ReceivePage(targets[index].PageIndex, tasks[index], generation);
+        IReadOnlyList<Task<ViewerRenderResult>> tasks = _renderer.RenderVisible(targets.Select(target => target.Request).ToArray());
+        for (int index = 0; index < tasks.Count; index++) ReceivePage(targets[index].LogicalIndex, tasks[index], generation);
     }
 
     private async void ReceivePage(int index, Task<ViewerRenderResult> task, long generation)

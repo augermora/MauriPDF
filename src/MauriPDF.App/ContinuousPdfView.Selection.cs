@@ -99,7 +99,7 @@ internal sealed partial class ContinuousPdfView
         double left = _layout.Left(page, ViewWidth) - _left;
         double top = geometry.Top - _top;
         if (!nearest && (point.X < left || point.X > left + geometry.Width || point.Y < top || point.Y > top + geometry.Height)) return null;
-        var rotation = _layout.Rotation;
+        var rotation = _layout.RotationForPage(page);
         return new(page, TextCoordinateTransform.ToPage(point.X, point.Y, left, top, geometry.Width, geometry.Height, rotation),
             rotation.SwapsDimensions ? geometry.Height : geometry.Width, rotation.SwapsDimensions ? geometry.Width : geometry.Height);
     }
@@ -114,7 +114,7 @@ internal sealed partial class ContinuousPdfView
         {
             if (!_textPages.TryGetValue(anchor.Page, out PdfTextPage? anchorText))
             {
-                anchorText = await _renderer.ExtractTextAsync(anchor.Page);
+                anchorText = await _renderer.ExtractTextAsync(SourcePageIndex(anchor.Page));
                 if (_disposed || interaction != _interaction) return;
                 _textPages.Add(anchor.Page, anchorText);
             }
@@ -139,7 +139,7 @@ internal sealed partial class ContinuousPdfView
                     if (!_textPages.ContainsKey(page)) { missing = page; break; }
                 if (missing >= 0)
                 {
-                    PdfTextPage text = await _renderer.ExtractTextAsync(missing);
+                    PdfTextPage text = await _renderer.ExtractTextAsync(SourcePageIndex(missing));
                     if (_disposed || interaction != _interaction) return;
                     if (_textPages.Values.Sum(page => page.Count) + text.Count > TextSelection.MaximumCharacters)
                     {
@@ -180,7 +180,7 @@ internal sealed partial class ContinuousPdfView
         {
             TextBounds box = text[index].Bounds;
             if (!box.HasArea || text[index].Unicode is 0 or 10 or 13) continue;
-            TextBounds mapped = TextCoordinateTransform.ToDisplay(box, display.Left, display.Top, display.Width, display.Height, _layout!.Rotation);
+            TextBounds mapped = TextCoordinateTransform.ToDisplay(box, display.Left, display.Top, display.Width, display.Height, _layout!.RotationForPage(page));
             graphics.FillRectangle(_selectionBrush, (float)mapped.Left, (float)mapped.Top,
                 (float)(mapped.Right - mapped.Left), (float)(mapped.Bottom - mapped.Top));
         }
