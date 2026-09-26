@@ -34,7 +34,8 @@ public sealed class PdfMaterializationIntegrationTests
             edits.Execute(new RotatePageEdit(a, true));
 
             PdfMaterializationResult result = await new PdfiumDocumentMaterializer()
-                .MaterializeAsync(source, output, PdfMaterializationPlan.From(edits.State), cancellationToken);
+                .MaterializeAsync(new(source, output, PdfMaterializationPlan.From(edits.State),
+                    PdfDestinationPolicy.RequireMissing), cancellationToken);
 
             Assert.Equal(2, result.PageCount);
             Assert.True(result.FileLength > 100);
@@ -73,12 +74,101 @@ public sealed class PdfMaterializationIntegrationTests
             await File.WriteAllBytesAsync(source, original, cancellationToken);
             await File.WriteAllBytesAsync(output, existing, cancellationToken);
             PdfMaterializationPlan invalid = PdfMaterializationPlan.From(new DocumentEditSession(4).State);
-            await Assert.ThrowsAsync<InvalidDataException>(() => new PdfiumDocumentMaterializer().MaterializeAsync(source, output, invalid, cancellationToken));
+            await Assert.ThrowsAsync<InvalidDataException>(() => new PdfiumDocumentMaterializer().MaterializeAsync(
+                new(source, output, invalid, PdfDestinationPolicy.OverwriteApproved), cancellationToken));
             Assert.Equal(existing, await File.ReadAllBytesAsync(output, cancellationToken));
             Assert.Equal(original, await File.ReadAllBytesAsync(source, cancellationToken));
             Assert.Empty(Directory.EnumerateFiles(directory, ".*.tmp"));
-            await Assert.ThrowsAsync<IOException>(() => new PdfiumDocumentMaterializer().MaterializeAsync(source, source,
-                PdfMaterializationPlan.From(new DocumentEditSession(3).State), cancellationToken));
+            await Assert.ThrowsAsync<IOException>(() => new PdfiumDocumentMaterializer().MaterializeAsync(new(source, source,
+                PdfMaterializationPlan.From(new DocumentEditSession(3).State), PdfDestinationPolicy.OverwriteApproved), cancellationToken));
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    [Fact]
+    public async Task RepeatedSaveReplacesExpectedTargetDetectsExternalChangesAndKeepsSource()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"mauripdf-resave-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        string source = Path.Combine(directory, "source.pdf"), output = Path.Combine(directory, "output.pdf");
+        try
+        {
+            byte[] original = CreateSourcePdf();
+            await File.WriteAllBytesAsync(source, original, TestContext.Current.CancellationToken);
+            PdfiumDocumentMaterializer writer = new();
+            DocumentEditSession edits = new(3);
+            edits.Execute(new DeletePageEdit(edits.State.Pages[1].Id));
+            PdfMaterializationResult first = await writer.MaterializeAsync(new(source, output,
+                PdfMaterializationPlan.From(edits.State), PdfDestinationPolicy.RequireMissing), TestContext.Current.CancellationToken);
+            edits.MarkSavedBaseline(edits.State.Revision);
+
+            Assert.True(edits.Undo()); // Restores B from the still-open/original source model.
+            Assert.True(edits.IsDirty);
+            PdfMaterializationResult second = await writer.MaterializeAsync(new(source, output,
+                PdfMaterializationPlan.From(edits.State), PdfDestinationPolicy.RequireExpectedIdentity, first.DestinationIdentity),
+                TestContext.Current.CancellationToken);
+            edits.MarkSavedBaseline(edits.State.Revision);
+            Assert.False(edits.IsDirty);
+            using (PdfiumRenderer renderer = new())
+            using (IPdfRenderSession session = renderer.Open(output))
+            {
+                Assert.Equal(3, session.PageCount);
+                Assert.Equal("PAGE B", Text(session.ExtractText(1)));
+            }
+            Assert.Equal(original, await File.ReadAllBytesAsync(source, TestContext.Current.CancellationToken));
+
+            await File.AppendAllTextAsync(output, "% external", TestContext.Current.CancellationToken);
+            byte[] external = await File.ReadAllBytesAsync(output, TestContext.Current.CancellationToken);
+            PdfDestinationConflictException conflict = await Assert.ThrowsAsync<PdfDestinationConflictException>(() =>
+                writer.MaterializeAsync(new(source, output, PdfMaterializationPlan.From(edits.State),
+                    PdfDestinationPolicy.RequireExpectedIdentity, second.DestinationIdentity), TestContext.Current.CancellationToken));
+            Assert.Equal(PdfDestinationConflictKind.Changed, conflict.Kind);
+            Assert.Equal(external, await File.ReadAllBytesAsync(output, TestContext.Current.CancellationToken));
+            Assert.Empty(Directory.EnumerateFiles(directory, ".*.tmp"));
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    [Fact]
+    public void SavedFileIdentityDetectsSameLengthContentChanges()
+    {
+        string path = Path.GetTempFileName();
+        try
+        {
+            File.WriteAllText(path, "AAAA");
+            SavedFileIdentity first = SavedFileIdentity.Capture(path);
+            File.WriteAllText(path, "BBBB");
+            File.SetLastWriteTimeUtc(path, first.LastWriteTimeUtc);
+            Assert.NotEqual(first, SavedFileIdentity.Capture(path));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
+    public async Task ExpectedDestinationMustStillExistAndMissingPolicyWillNotOverwrite()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"mauripdf-policy-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        string source = Path.Combine(directory, "source.pdf"), output = Path.Combine(directory, "output.pdf");
+        try
+        {
+            await File.WriteAllBytesAsync(source, CreateSourcePdf(), TestContext.Current.CancellationToken);
+            await File.WriteAllTextAsync(output, "existing", TestContext.Current.CancellationToken);
+            SavedFileIdentity expected = SavedFileIdentity.Capture(output);
+            PdfMaterializationPlan plan = PdfMaterializationPlan.From(new DocumentEditSession(3).State);
+            File.Delete(output);
+            PdfDestinationConflictException missing = await Assert.ThrowsAsync<PdfDestinationConflictException>(() =>
+                new PdfiumDocumentMaterializer().MaterializeAsync(new(source, output, plan,
+                    PdfDestinationPolicy.RequireExpectedIdentity, expected), TestContext.Current.CancellationToken));
+            Assert.Equal(PdfDestinationConflictKind.Missing, missing.Kind);
+
+            await File.WriteAllTextAsync(output, "appeared", TestContext.Current.CancellationToken);
+            PdfDestinationConflictException appeared = await Assert.ThrowsAsync<PdfDestinationConflictException>(() =>
+                new PdfiumDocumentMaterializer().MaterializeAsync(new(source, output, plan,
+                    PdfDestinationPolicy.RequireMissing), TestContext.Current.CancellationToken));
+            Assert.Equal(PdfDestinationConflictKind.UnexpectedlyExists, appeared.Kind);
+            Assert.Equal("appeared", await File.ReadAllTextAsync(output, TestContext.Current.CancellationToken));
+            Assert.Empty(Directory.EnumerateFiles(directory, ".*.tmp"));
         }
         finally { Directory.Delete(directory, recursive: true); }
     }

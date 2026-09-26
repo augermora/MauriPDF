@@ -20,6 +20,11 @@ internal sealed class MainForm : Form
     private readonly ToolStripButton _toggleThumbnails = new("Sidebar") { Checked = true, ToolTipText = "Show/hide navigation sidebar (F4)" };
     private readonly ToolStripLabel _loading = new();
     private readonly ToolStripButton _open = new("Open PDF");
+    private readonly ToolStripButton _save = new("Save") { ToolTipText = "Save (Ctrl+S)" };
+    private readonly ToolStripDropDownButton _fileMenu = new("File");
+    private readonly ToolStripMenuItem _openMenu = new("Open...") { ShortcutKeyDisplayString = "Ctrl+O" };
+    private readonly ToolStripMenuItem _saveMenu = new("Save") { ShortcutKeyDisplayString = "Ctrl+S" };
+    private readonly ToolStripMenuItem _saveAsMenu = new("Save As...") { ShortcutKeyDisplayString = "Ctrl+Shift+S" };
     private readonly ToolStripButton _previous = new("<") { ToolTipText = "Previous page" };
     private readonly ToolStripButton _next = new(">") { ToolTipText = "Next page" };
     private readonly ToolStripTextBox _pageNumber = new() { AutoSize = false, Width = 55, AccessibleName = "Page number" };
@@ -51,6 +56,7 @@ internal sealed class MainForm : Form
     private ViewerState? _state;
     private string? _sourcePath;
     private string? _savedDocumentPath;
+    private SavedFileIdentity? _savedDocumentIdentity;
     private long _requestId;
     private bool _resourcesDisposed;
     private bool _closing;
@@ -84,7 +90,12 @@ internal sealed class MainForm : Form
         MinimumSize = new Size(850, 600);
 
         _open.Click += (_, _) => ChooseDocument();
+        _save.Click += async (_, _) => await SaveAsync();
         _saveAs.Click += async (_, _) => await ChooseSaveAsAsync();
+        _fileMenu.DropDownItems.AddRange([_openMenu, new ToolStripSeparator(), _saveMenu, _saveAsMenu]);
+        _openMenu.Click += (_, _) => ChooseDocument();
+        _saveMenu.Click += async (_, _) => await SaveAsync();
+        _saveAsMenu.Click += async (_, _) => await ChooseSaveAsAsync();
         _previous.Click += (_, _) => ChangeState(_state?.PreviousPage(), navigate: true);
         _next.Click += (_, _) => ChangeState(_state?.NextPage(), navigate: true);
         _zoomOut.Click += (_, _) => ChangeState(_state?.ZoomOut());
@@ -110,7 +121,7 @@ internal sealed class MainForm : Form
         _pageNumber.Leave += (_, _) => UpdateToolbar();
         ToolStrip toolbar = new() { GripStyle = ToolStripGripStyle.Hidden };
         toolbar.Items.AddRange([
-            _open, _saveAs, _toggleThumbnails, new ToolStripSeparator(), _previous, _pageNumber, _totalPages, _next,
+            _fileMenu, _open, _save, _saveAs, _toggleThumbnails, new ToolStripSeparator(), _previous, _pageNumber, _totalPages, _next,
             new ToolStripSeparator(), _zoomOut, _resetZoom, _zoomIn, _zoomLabel, _fitPage, _fitWidth,
             _displayMode, _rotateLeft, _rotateRight, _pageEdits, _loading
         ]);
@@ -146,6 +157,11 @@ internal sealed class MainForm : Form
         if (keyData == (Keys.Control | Keys.Shift | Keys.S))
         {
             _ = ChooseSaveAsAsync();
+            return true;
+        }
+        if (keyData == (Keys.Control | Keys.S))
+        {
+            _ = SaveAsync();
             return true;
         }
 
@@ -277,6 +293,7 @@ internal sealed class MainForm : Form
 
             _sourcePath = Path.GetFullPath(path);
             _savedDocumentPath = null;
+            _savedDocumentIdentity = null;
             _documentName = Path.GetFileName(path);
             _loading.Text = string.Empty;
             _state = new ViewerState(pages.Count);
@@ -348,7 +365,8 @@ internal sealed class MainForm : Form
 
     private void UpdateToolbar()
     {
-        Text = _documentName is null ? "MauriPDF" : $"MauriPDF — {_documentName}{(_edits?.IsDirty == true ? " *" : "")}";
+        string? currentName = _savedDocumentPath is null ? _documentName : Path.GetFileName(_savedDocumentPath);
+        Text = currentName is null ? "MauriPDF" : $"MauriPDF — {currentName}{(_edits?.IsDirty == true ? " *" : "")}";
         _pageEdits.Enabled = _edits is not null && !_closing && !_saving;
         _deletePage.Enabled = !_saving && _state?.PageCount > 1;
         _moveEarlier.Enabled = !_saving && _state?.CanGoPrevious == true;
@@ -356,7 +374,11 @@ internal sealed class MainForm : Form
         _undo.Enabled = !_saving && _edits?.CanUndo == true;
         _redo.Enabled = !_saving && _edits?.CanRedo == true;
         _saveAs.Enabled = _edits is not null && !_closing && !_saving;
+        _save.Enabled = _edits is not null && !_closing && !_saving;
         _open.Enabled = !_closing && !_saving;
+        _saveMenu.Enabled = _save.Enabled;
+        _saveAsMenu.Enabled = _saveAs.Enabled;
+        _openMenu.Enabled = _open.Enabled;
         _thumbnails.SetRotation(_state?.Rotation ?? default);
         _displayMode.Enabled = _rotateLeft.Enabled = _rotateRight.Enabled = _state is not null;
         _singlePageMode.Checked = _state?.DisplayMode == ViewerDisplayMode.SinglePage;
@@ -381,6 +403,7 @@ internal sealed class MainForm : Form
         _edits = null;
         _sourcePath = null;
         _savedDocumentPath = null;
+        _savedDocumentIdentity = null;
         _documentName = null;
         _outline.Clear();
         _renderer.CancelOutline();
@@ -476,31 +499,89 @@ internal sealed class MainForm : Form
             return;
         }
 
-        DocumentEditSession edits = _edits;
-        PdfMaterializationPlan snapshot = PdfMaterializationPlan.From(edits.State);
+        await PersistAsync(destination, PdfDestinationPolicy.OverwriteApproved, null);
+    }
+
+    private async Task SaveAsync()
+    {
+        if (_saving || _closing || _edits is null || _sourcePath is null) return;
+        if (_savedDocumentPath is null) { await ChooseSaveAsAsync(); return; }
+
+        string destination = _savedDocumentPath;
+        SavedFileIdentity? expected = _savedDocumentIdentity;
+        PdfDestinationConflictKind? conflict = null;
         _saving = true;
         _loading.Text = "Saving...";
         UpdateToolbar();
         try
         {
-            PdfMaterializationResult result = await _materializer.MaterializeAsync(_sourcePath, destination, snapshot);
-            if (_resourcesDisposed || _closing || !ReferenceEquals(edits, _edits)) return;
-            edits.MarkSavedBaseline(snapshot.Revision);
-            _savedDocumentPath = destination;
-            _loading.Text = $"Saved {result.PageCount} pages as {Path.GetFileName(destination)}";
+            if (expected is null || !File.Exists(destination)) conflict = PdfDestinationConflictKind.Missing;
+            else
+            {
+                SavedFileIdentity current = await Task.Run(() => SavedFileIdentity.Capture(destination));
+                if (current != expected) conflict = PdfDestinationConflictKind.Changed;
+                else if (_edits.IsDirty)
+                {
+                    await PersistCoreAsync(destination, PdfDestinationPolicy.RequireExpectedIdentity, expected);
+                }
+                else _loading.Text = "Saved";
+            }
         }
-        catch (Exception exception)
-        {
-            if (!_resourcesDisposed && !_closing) ShowSaveError(exception);
-        }
+        catch (PdfDestinationConflictException exception) { conflict = exception.Kind; }
+        catch (Exception exception) { if (!_resourcesDisposed && !_closing) ShowSaveError(exception); }
         finally
         {
             _saving = false;
             if (!_resourcesDisposed) UpdateToolbar();
         }
+        if (conflict.HasValue && !_resourcesDisposed && !_closing) await ResolveConflictAsync(conflict.Value, destination);
     }
 
-    private void ShowSaveError(Exception exception) => MessageBox.Show(this,
-        $"MauriPDF could not save the PDF.\n\n{exception.Message}", "MauriPDF",
-        MessageBoxButtons.OK, MessageBoxIcon.Error);
+    private async Task ResolveConflictAsync(PdfDestinationConflictKind conflict, string destination)
+    {
+        bool missing = conflict == PdfDestinationConflictKind.Missing;
+        using SaveConflictDialog dialog = new(missing);
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        if (dialog.Choice == SaveConflictChoice.SaveAs) { await ChooseSaveAsAsync(); return; }
+        if (dialog.Choice == SaveConflictChoice.OverwriteOrRecreate)
+            await PersistAsync(destination, missing ? PdfDestinationPolicy.RequireMissing : PdfDestinationPolicy.OverwriteApproved, null);
+    }
+
+    private async Task PersistAsync(string destination, PdfDestinationPolicy policy, SavedFileIdentity? expected)
+    {
+        if (_saving || _closing || _edits is null || _sourcePath is null) return;
+        _saving = true;
+        _loading.Text = "Saving...";
+        UpdateToolbar();
+        PdfDestinationConflictKind? conflict = null;
+        try { await PersistCoreAsync(destination, policy, expected); }
+        catch (PdfDestinationConflictException exception) { conflict = exception.Kind; }
+        catch (Exception exception) { if (!_resourcesDisposed && !_closing) ShowSaveError(exception); }
+        finally
+        {
+            _saving = false;
+            if (!_resourcesDisposed) UpdateToolbar();
+        }
+        if (conflict.HasValue && !_resourcesDisposed && !_closing) await ResolveConflictAsync(conflict.Value, destination);
+    }
+
+    private async Task PersistCoreAsync(string destination, PdfDestinationPolicy policy, SavedFileIdentity? expected)
+    {
+        DocumentEditSession edits = _edits!;
+        PdfMaterializationPlan snapshot = PdfMaterializationPlan.From(edits.State);
+        PdfMaterializationRequest request = new(_sourcePath!, destination, snapshot, policy, expected);
+        PdfMaterializationResult result = await _materializer.MaterializeAsync(request);
+        if (_resourcesDisposed || _closing || !ReferenceEquals(edits, _edits)) return;
+        edits.MarkSavedBaseline(snapshot.Revision);
+        _savedDocumentPath = destination;
+        _savedDocumentIdentity = result.DestinationIdentity;
+        _loading.Text = $"Saved {result.PageCount} pages as {Path.GetFileName(destination)}";
+    }
+
+    private void ShowSaveError(Exception exception)
+    {
+        _loading.Text = "Save failed";
+        MessageBox.Show(this, $"MauriPDF could not save the PDF.\n\n{exception.Message}", "MauriPDF",
+            MessageBoxButtons.OK, MessageBoxIcon.Error);
+    }
 }

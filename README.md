@@ -18,7 +18,7 @@ The main display retains at most 32 visible Bitmaps and 64 MiB of pixel storage.
 
 The **Pages** menu edits the current logical page: Delete, Move Earlier/Later, and structural Rotate Clockwise/Counter-clockwise. These changes immediately affect both display modes and thumbnails while the source PDF stays unchanged. Structural rotation is per-page edit state, separate from the view-only ↶ / ↷ buttons. Undo/Redo (Ctrl+Z/Ctrl+Y outside text editors) retains up to 100 operations. A title asterisk marks edits; undoing to the saved baseline clears it. Closing or replacing a dirty document offers **Discard / Cancel**, with Cancel the default.
 
-**Save As** (Ctrl+Shift+S) writes the logical order, deletions, and structural rotations to a different PDF without rasterizing its pages. It uses a validated temporary sibling file and never overwrites the open source. The viewer stays backed by that source after success, while the saved revision becomes the clean baseline; Undo makes it dirty and Redo can return to clean. Bookmarks, named destinations, document metadata, and page links are not copied in this first writer milestone. Ordinary Save, insertion/import, extraction/export, merge, and annotation editing are not implemented.
+**Save** (Ctrl+S) and **Save As** (Ctrl+Shift+S) write the logical order, deletions, and structural rotations without rasterizing pages. The first Save routes to Save As and never overwrites the open source; later Saves safely replace the most recently chosen output. A validated temporary sibling, backup-backed replacement, and SHA-256 destination identity protect the last valid copy and warn before overwriting an externally changed or missing output. The viewer stays backed by the original source, while each successful save becomes the clean baseline; Undo makes it dirty and Redo can return to clean. Bookmarks, named destinations, document metadata, and page links are not copied. Insertion/import, extraction/export, merge, and annotation editing are not implemented.
 
 Moves keep the same source page current; deleting the current page chooses the following page, or the previous page at the end. The final remaining page cannot be deleted. Any deletion/reorder, including Undo/Redo, clears text selection and restarts an open search in edited order while retaining its query and current page. Structural rotation preserves selection and search. Bookmarks resolve their source page to its edited position; a deleted destination remains visible but does nothing. Reopening starts with the original order, zero structural/visual rotation, and empty history.
 
@@ -49,7 +49,7 @@ dotnet test MauriPDF.slnx --configuration Release --no-build
 - `src/MauriPDF.App`: WinForms executable and composition root
 - `src/MauriPDF.Core`: UI- and PDF-library-independent application core
 - `src/MauriPDF.Rendering`: PDF rendering implementation boundary
-- `src/MauriPDF.Editing`: logical edit state/history and PDF Save As materialization
+- `src/MauriPDF.Editing`: logical edit state/history and PDF Save/Save As materialization
 - `src/MauriPDF.Pdfium`: shared PDFium lifetime and process-wide native-call serialization
 - `src/MauriPDF.Infrastructure`: local filesystem, settings, and operating-system integration
 - `tests`: test projects corresponding to the production projects

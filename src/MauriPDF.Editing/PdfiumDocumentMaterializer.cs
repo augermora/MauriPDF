@@ -8,45 +8,100 @@ public sealed class PdfiumDocumentMaterializer : IPdfDocumentMaterializer
 {
     private const ulong NoIncrementalSave = 2;
 
-    public Task<PdfMaterializationResult> MaterializeAsync(string sourcePath, string destinationPath,
-        PdfMaterializationPlan plan, CancellationToken cancellationToken = default)
+    public Task<PdfMaterializationResult> MaterializeAsync(PdfMaterializationRequest request,
+        CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(request);
+        string sourcePath = request.SourcePath, destinationPath = request.DestinationPath;
+        PdfMaterializationPlan plan = request.Plan;
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
         ArgumentNullException.ThrowIfNull(plan);
-        if (plan.Pages.Count == 0) throw new ArgumentException("A PDF must contain at least one page.", nameof(plan));
+        if (plan.Pages.Count == 0) throw new ArgumentException("A PDF must contain at least one page.", nameof(request));
+        if (request.DestinationPolicy == PdfDestinationPolicy.RequireExpectedIdentity
+            && request.ExpectedDestinationIdentity is null)
+            throw new ArgumentException("An expected destination identity is required.", nameof(request));
 
         string source = Path.GetFullPath(sourcePath);
         string destination = Path.GetFullPath(destinationPath);
-        if (string.Equals(source, destination, StringComparison.OrdinalIgnoreCase))
-            throw new IOException("Save As cannot overwrite the currently open source PDF. Choose a different file.");
         if (!File.Exists(source)) throw new FileNotFoundException("The source PDF was not found.", source);
+        FilePathIdentity.RejectSourceAlias(source, destination);
         string directory = Path.GetDirectoryName(destination) ?? throw new IOException("The destination directory is invalid.");
         if (!Directory.Exists(directory)) throw new DirectoryNotFoundException("The destination directory does not exist.");
 
-        return Task.Run(() => Materialize(source, destination, directory, plan, cancellationToken), cancellationToken);
+        return Task.Run(() => Materialize(source, destination, directory, request, cancellationToken), cancellationToken);
     }
 
     private static PdfMaterializationResult Materialize(string sourcePath, string destinationPath, string directory,
-        PdfMaterializationPlan plan, CancellationToken cancellationToken)
+        PdfMaterializationRequest request, CancellationToken cancellationToken)
     {
+        PdfMaterializationPlan plan = request.Plan;
         cancellationToken.ThrowIfCancellationRequested();
         string temporaryPath = CreateTemporaryPath(directory, Path.GetFileName(destinationPath));
+        string? backupPath = null;
+        bool replacementCompleted = false;
         try
         {
             using IDisposable library = PdfiumRuntime.Acquire();
             using IDisposable nativeCall = PdfiumRuntime.Enter();
             WriteTemporary(sourcePath, temporaryPath, plan, cancellationToken);
-            PdfMaterializationResult result = ValidateTemporary(temporaryPath, plan.Pages.Count);
+            (int pageCount, long fileLength) = ValidateTemporary(temporaryPath, plan.Pages.Count);
             cancellationToken.ThrowIfCancellationRequested();
-            File.Move(temporaryPath, destinationPath, overwrite: true);
-            return result;
+            VerifyDestination(request, destinationPath);
+            FilePathIdentity.RejectSourceAlias(sourcePath, destinationPath);
+            if (File.Exists(destinationPath))
+            {
+                backupPath = CreateTemporaryPath(directory, $"{Path.GetFileName(destinationPath)}.backup");
+                File.Replace(temporaryPath, destinationPath, backupPath, ignoreMetadataErrors: true);
+            }
+            else
+            {
+                File.Move(temporaryPath, destinationPath);
+            }
+            replacementCompleted = true;
+            SavedFileIdentity identity = SavedFileIdentity.Capture(destinationPath);
+            if (backupPath is not null) File.Delete(backupPath);
+            return new(pageCount, fileLength, identity);
+        }
+        catch
+        {
+            if (replacementCompleted && backupPath is not null && File.Exists(backupPath))
+            {
+                try { File.Replace(backupPath, destinationPath, null, ignoreMetadataErrors: true); }
+                catch (Exception rollbackError)
+                {
+                    throw new IOException($"Save completed on disk, but state update failed and recovery could not restore the prior file. Recovery copy: {backupPath}", rollbackError);
+                }
+            }
+            else if (replacementCompleted && backupPath is null)
+            {
+                try { File.Delete(destinationPath); } catch { }
+            }
+            throw;
         }
         finally
         {
             try { File.Delete(temporaryPath); }
             catch { /* Preserve the original save error; best-effort cleanup is retried by normal temp maintenance. */ }
         }
+    }
+
+    private static void VerifyDestination(PdfMaterializationRequest request, string destinationPath)
+    {
+        bool exists = File.Exists(destinationPath);
+        if (request.DestinationPolicy == PdfDestinationPolicy.RequireMissing)
+        {
+            if (exists) throw new PdfDestinationConflictException(PdfDestinationConflictKind.UnexpectedlyExists,
+                "The destination appeared while the PDF was being saved.");
+            return;
+        }
+        if (request.DestinationPolicy != PdfDestinationPolicy.RequireExpectedIdentity) return;
+        if (!exists) throw new PdfDestinationConflictException(PdfDestinationConflictKind.Missing,
+            "The saved PDF was removed outside MauriPDF.");
+        SavedFileIdentity current = SavedFileIdentity.Capture(destinationPath);
+        if (current != request.ExpectedDestinationIdentity)
+            throw new PdfDestinationConflictException(PdfDestinationConflictKind.Changed,
+                "The saved PDF was changed outside MauriPDF.");
     }
 
     private static string CreateTemporaryPath(string directory, string destinationName)
@@ -138,7 +193,7 @@ public sealed class PdfiumDocumentMaterializer : IPdfDocumentMaterializer
         }
     }
 
-    private static PdfMaterializationResult ValidateTemporary(string path, int expectedPageCount)
+    private static (int PageCount, long FileLength) ValidateTemporary(string path, int expectedPageCount)
     {
         FileInfo file = new(path);
         if (!file.Exists || file.Length < 8) throw new InvalidDataException("The generated PDF is empty or incomplete.");
@@ -156,7 +211,7 @@ public sealed class PdfiumDocumentMaterializer : IPdfDocumentMaterializer
                     throw new InvalidDataException($"The generated PDF has invalid dimensions on page {index + 1}.");
             }
             ValidateFirstPageRender(document);
-            return new(count, file.Length);
+            return (count, file.Length);
         }
         finally { fpdfview.FPDF_CloseDocument(document); }
     }

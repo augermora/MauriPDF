@@ -22,10 +22,33 @@ public sealed class PdfMaterializationPlan
     }
 }
 
-public readonly record struct PdfMaterializationResult(int PageCount, long FileLength);
+public enum PdfDestinationPolicy
+{
+    OverwriteApproved,
+    RequireExpectedIdentity,
+    RequireMissing
+}
+
+public sealed record PdfMaterializationRequest(
+    string SourcePath,
+    string DestinationPath,
+    PdfMaterializationPlan Plan,
+    PdfDestinationPolicy DestinationPolicy,
+    SavedFileIdentity? ExpectedDestinationIdentity = null);
+
+public readonly record struct PdfMaterializationResult(
+    int PageCount, long FileLength, SavedFileIdentity DestinationIdentity);
+
+public enum PdfDestinationConflictKind { Changed, Missing, UnexpectedlyExists }
+
+public sealed class PdfDestinationConflictException : IOException
+{
+    public PdfDestinationConflictException(PdfDestinationConflictKind kind, string message) : base(message) => Kind = kind;
+    public PdfDestinationConflictKind Kind { get; }
+}
 
 public interface IPdfDocumentMaterializer
 {
     Task<PdfMaterializationResult> MaterializeAsync(
-        string sourcePath, string destinationPath, PdfMaterializationPlan plan, CancellationToken cancellationToken = default);
+        PdfMaterializationRequest request, CancellationToken cancellationToken = default);
 }
