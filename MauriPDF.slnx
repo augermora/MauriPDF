@@ -8,6 +8,7 @@
     <Project Path="src/MauriPDF.Rendering/MauriPDF.Rendering.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/MauriPDF.App.Tests/MauriPDF.App.Tests.csproj" />
     <Project Path="tests/MauriPDF.Core.Tests/MauriPDF.Core.Tests.csproj" />
     <Project Path="tests/MauriPDF.Editing.Tests/MauriPDF.Editing.Tests.csproj" />
     <Project Path="tests/MauriPDF.Infrastructure.Tests/MauriPDF.Infrastructure.Tests.csproj" />

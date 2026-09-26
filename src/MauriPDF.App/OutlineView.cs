@@ -14,6 +14,12 @@ internal sealed class OutlineView : UserControl
     public OutlineView()
     {
         Dock = DockStyle.Fill;
+        BackColor = Presentation.MauriPdfTheme.Panel;
+        _tree.BorderStyle = BorderStyle.None;
+        _tree.BackColor = Presentation.MauriPdfTheme.Panel;
+        _tree.ForeColor = Presentation.MauriPdfTheme.Ink;
+        _status.ForeColor = Presentation.MauriPdfTheme.Muted;
+        _status.Padding = new Padding(Presentation.MauriPdfTheme.Space);
         Controls.Add(_tree);
         Controls.Add(_status);
         _tree.NodeMouseClick += (_, e) =>

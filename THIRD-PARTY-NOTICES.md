@@ -1,5 +1,10 @@
 # Third-party notices
 
+The application's **MauriPDF Line** command icons are original geometric vector drawings in
+`src/MauriPDF.App/Presentation/CommandIcons.cs`, distributed under MauriPDF's GPLv3 license.
+They contain no third-party icon artwork. Segoe UI is requested from the operating system;
+no font files are redistributed. No additional UI framework or SVG library is included.
+
 MauriPDF is licensed under the GNU General Public License version 3. The following third-party components are used by the PDF rendering and Save As implementations and retain their own copyright and license terms.
 
 ## PDFiumCore 154.0.8035

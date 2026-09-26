@@ -5,13 +5,13 @@ using MauriPDF.Editing;
 
 namespace MauriPDF.App;
 
-internal sealed class MainForm : Form
+internal sealed partial class MainForm : Form
 {
     private readonly PdfViewerRenderer _renderer;
     private readonly IPdfDocumentMaterializer _materializer;
     private readonly ThumbnailListView _thumbnails;
     private readonly OutlineView _outline = new();
-    private readonly TabControl _navigationTabs = new() { Dock = DockStyle.Fill };
+    private readonly TabControl _navigationTabs = new Presentation.ShellTabs() { Dock = DockStyle.Fill };
     private readonly SplitContainer _split = new()
     {
         Dock = DockStyle.Fill, Size = new Size(850, 550), Panel1MinSize = 170,
@@ -63,14 +63,16 @@ internal sealed class MainForm : Form
     private bool _shutdownComplete;
     private bool _saving;
 
-    public MainForm(PdfViewerRenderer renderer, IPdfDocumentMaterializer? materializer = null)
+    public MainForm(PdfViewerRenderer renderer, IPdfDocumentMaterializer? materializer = null, Printing.IPdfPrintWorkflow? printer = null)
     {
         _renderer = renderer;
         _materializer = materializer ?? new PdfiumDocumentMaterializer();
+        _printer = printer ?? new Printing.PdfPrintWorkflow();
         _viewport = new ContinuousPdfView(renderer);
         _searchBar = new DocumentSearchBar(renderer, _viewport);
         _viewport.RenderFailed += ShowError;
         _viewport.SelectionStatusChanged += message => _loading.Text = message;
+        _viewport.SelectionAvailabilityChanged += QueueCopyAvailabilityRefresh;
         _viewport.CurrentPageChanged += index =>
         {
             _state = _state?.GoToPage(index + 1);
@@ -119,28 +121,21 @@ internal sealed class MainForm : Form
         _redo.Click += (_, _) => ApplyHistory(undo: false);
         _pageNumber.KeyDown += PageNumber_KeyDown;
         _pageNumber.Leave += (_, _) => UpdateToolbar();
-        ToolStrip toolbar = new() { GripStyle = ToolStripGripStyle.Hidden };
-        toolbar.Items.AddRange([
-            _fileMenu, _open, _save, _saveAs, _toggleThumbnails, new ToolStripSeparator(), _previous, _pageNumber, _totalPages, _next,
-            new ToolStripSeparator(), _zoomOut, _resetZoom, _zoomIn, _zoomLabel, _fitPage, _fitWidth,
-            _displayMode, _rotateLeft, _rotateRight, _pageEdits, _loading
-        ]);
         TabPage thumbnailsTab = new("Thumbnails");
         thumbnailsTab.Controls.Add(_thumbnails);
         TabPage outlineTab = new("Outline");
         outlineTab.Controls.Add(_outline);
         _navigationTabs.TabPages.AddRange([thumbnailsTab, outlineTab]);
-        _navigationTabs.SelectedIndexChanged += (_, _) => UpdateSidebarActivity();
+        _navigationTabs.SelectedIndexChanged += (_, _) => { UpdateSidebarActivity(); UpdateShellCommands(); };
         _split.Panel1.Controls.Add(_navigationTabs);
         _split.Panel2.Controls.Add(_viewport);
-        Controls.Add(_split);
-        Controls.Add(_searchBar);
-        Controls.Add(toolbar);
+        InitializeShell();
         UpdateToolbar();
     }
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        if (keyData == (Keys.Control | Keys.P)) { _ = PrintAsync(); return true; }
         if (keyData == (Keys.Control | Keys.F)) { _searchBar.OpenSearch(); return true; }
         if (keyData is Keys.F3 or (Keys.Shift | Keys.F3)) { _searchBar.Navigate(keyData.HasFlag(Keys.Shift)); return true; }
         if (keyData == Keys.Escape && _searchBar.Visible) { _searchBar.CloseSearch(); return true; }
@@ -225,6 +220,14 @@ internal sealed class MainForm : Form
         }
 
         base.Dispose(disposing);
+        if (disposing && !_shellDisposed)
+        {
+            _shellDisposed = true;
+            _commandSources?.Dispose();
+            _loading.Dispose();
+            _icons.Dispose();
+            _theme.Dispose();
+        }
     }
 
     protected override async void OnFormClosing(FormClosingEventArgs e)
@@ -232,7 +235,7 @@ internal sealed class MainForm : Form
         base.OnFormClosing(e);
         if (_shutdownComplete || e.Cancel) return;
         e.Cancel = true;
-        if (_saving) { _loading.Text = "Saving..."; return; }
+        if (DocumentBusy) { _loading.Text = _printing ? "Printing…" : "Saving..."; return; }
         if (_closing) return;
         if (!ConfirmDiscardChanges()) return;
         _closing = true;
@@ -262,7 +265,7 @@ internal sealed class MainForm : Form
 
     private async void ChooseDocument()
     {
-        if (_closing || _saving) return;
+        if (_closing || DocumentBusy) return;
         using OpenFileDialog dialog = new()
         {
             CheckFileExists = true,
@@ -279,7 +282,7 @@ internal sealed class MainForm : Form
 
     private async Task OpenDocumentAsync(string path)
     {
-        if (_closing || _saving || !ConfirmDiscardChanges()) return;
+        if (_closing || DocumentBusy || !ConfirmDiscardChanges()) return;
         CloseDocument();
         long requestId = ++_requestId;
         _loading.Text = "Opening...";
@@ -367,15 +370,15 @@ internal sealed class MainForm : Form
     {
         string? currentName = _savedDocumentPath is null ? _documentName : Path.GetFileName(_savedDocumentPath);
         Text = currentName is null ? "MauriPDF" : $"MauriPDF — {currentName}{(_edits?.IsDirty == true ? " *" : "")}";
-        _pageEdits.Enabled = _edits is not null && !_closing && !_saving;
-        _deletePage.Enabled = !_saving && _state?.PageCount > 1;
-        _moveEarlier.Enabled = !_saving && _state?.CanGoPrevious == true;
-        _moveLater.Enabled = !_saving && _state?.CanGoNext == true;
-        _undo.Enabled = !_saving && _edits?.CanUndo == true;
-        _redo.Enabled = !_saving && _edits?.CanRedo == true;
-        _saveAs.Enabled = _edits is not null && !_closing && !_saving;
-        _save.Enabled = _edits is not null && !_closing && !_saving;
-        _open.Enabled = !_closing && !_saving;
+        _pageEdits.Enabled = _edits is not null && !_closing && !DocumentBusy;
+        _deletePage.Enabled = !DocumentBusy && _state?.PageCount > 1;
+        _moveEarlier.Enabled = !DocumentBusy && _state?.CanGoPrevious == true;
+        _moveLater.Enabled = !DocumentBusy && _state?.CanGoNext == true;
+        _undo.Enabled = !DocumentBusy && _edits?.CanUndo == true;
+        _redo.Enabled = !DocumentBusy && _edits?.CanRedo == true;
+        _saveAs.Enabled = _edits is not null && !_closing && !DocumentBusy;
+        _save.Enabled = _edits is not null && !_closing && !DocumentBusy;
+        _open.Enabled = !_closing && !DocumentBusy;
         _saveMenu.Enabled = _save.Enabled;
         _saveAsMenu.Enabled = _saveAs.Enabled;
         _openMenu.Enabled = _open.Enabled;
@@ -396,6 +399,7 @@ internal sealed class MainForm : Form
         _fitPage.Checked = _state?.ZoomMode == ViewerZoomMode.FitPage;
         _fitWidth.Checked = _state?.ZoomMode == ViewerZoomMode.FitWidth;
         _zoomLabel.Text = _state?.ZoomMode == ViewerZoomMode.Manual ? $"{_state.ZoomPercent}%" : string.Empty;
+        UpdateShellCommands();
     }
 
     private void CloseDocument()
@@ -432,14 +436,14 @@ internal sealed class MainForm : Form
 
     private void EditCurrent(Func<Core.Documents.DocumentPageId, DocumentEdit> createEdit)
     {
-        if (_edits is null || _state is null || _closing || _saving || _resourcesDisposed) return;
+        if (_edits is null || _state is null || _closing || DocumentBusy || _resourcesDisposed) return;
         EditedDocumentState before = _edits.State;
         if (_edits.Execute(createEdit(before.Pages[_state.PageIndex].Id))) RefreshEditedDocument(before);
     }
 
     private void ApplyHistory(bool undo)
     {
-        if (_edits is null || _state is null || _closing || _saving || _resourcesDisposed) return;
+        if (_edits is null || _state is null || _closing || DocumentBusy || _resourcesDisposed) return;
         EditedDocumentState before = _edits.State;
         if (undo ? _edits.Undo() : _edits.Redo()) RefreshEditedDocument(before);
     }
@@ -462,13 +466,14 @@ internal sealed class MainForm : Form
         _split.Panel1Collapsed = !_split.Panel1Collapsed;
         _toggleThumbnails.Checked = !_split.Panel1Collapsed;
         UpdateSidebarActivity();
+        UpdateShellCommands();
     }
 
     private void UpdateSidebarActivity() => _thumbnails.SetActive(!_split.Panel1Collapsed && _navigationTabs.SelectedIndex == 0);
 
     private async Task ChooseSaveAsAsync()
     {
-        if (_saving || _closing || _edits is null || _sourcePath is null) return;
+        if (DocumentBusy || _closing || _edits is null || _sourcePath is null) return;
         using SaveFileDialog dialog = new()
         {
             AddExtension = true,
@@ -485,7 +490,7 @@ internal sealed class MainForm : Form
 
     private async Task SaveAsAsync(string destinationPath)
     {
-        if (_saving || _closing || _edits is null || _sourcePath is null) return;
+        if (DocumentBusy || _closing || _edits is null || _sourcePath is null) return;
         string destination;
         try { destination = Path.GetFullPath(destinationPath); }
         catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
@@ -504,7 +509,7 @@ internal sealed class MainForm : Form
 
     private async Task SaveAsync()
     {
-        if (_saving || _closing || _edits is null || _sourcePath is null) return;
+        if (DocumentBusy || _closing || _edits is null || _sourcePath is null) return;
         if (_savedDocumentPath is null) { await ChooseSaveAsAsync(); return; }
 
         string destination = _savedDocumentPath;
@@ -549,7 +554,7 @@ internal sealed class MainForm : Form
 
     private async Task PersistAsync(string destination, PdfDestinationPolicy policy, SavedFileIdentity? expected)
     {
-        if (_saving || _closing || _edits is null || _sourcePath is null) return;
+        if (DocumentBusy || _closing || _edits is null || _sourcePath is null) return;
         _saving = true;
         _loading.Text = "Saving...";
         UpdateToolbar();

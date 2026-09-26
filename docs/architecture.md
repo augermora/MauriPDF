@@ -1,5 +1,95 @@
 # Architecture
 
+## Presentation shell — refinement milestone
+
+`MainForm.Shell.cs` composes a brand header, `RibbonHost`, the existing nonmodal search bar, split
+workspace, and bottom `ShellStatusBar`. `MainForm` retains its document lifecycle and handlers. The
+PDF engine, writing backend, edit/history model, search logic, and virtualized viewer are unchanged.
+The selection surface exposes its existing copy availability as a read-only property/event so the
+shell can disable Copy when there is no selectable text.
+
+`MauriPdfTheme` centralizes the blue/slate palette, logical command/icon sizes, spacing, and owned
+Segoe UI fonts (body, caption, heading, title). Colors include #202B3C ink, #3478C9 accent, #F4F6F9
+background, white panels, #D8E0EA borders, and #64748B muted text. `ShellStripRenderer` styles search
+and status surfaces. `ShellTabs` keeps native TabControl focus/keyboard behavior with a selected
+underline. `RibbonCommandButton` retains native Button hover, pressed, disabled and focus behavior;
+selected commands also get an outline and accessible description. `RibbonGroup` supplies framed
+near-white groups, shaded caption bands, large primary commands and two-row compact secondary commands.
+The ribbon uses native Button-based headers with blue selected underlines and arrow/Home/End navigation.
+Owner-painted command surfaces distinguish hover, pressed, selected and primary states while retaining
+native button activation and focus cues. Logical ribbon height is 132 pixels; icons are 22/32 pixels.
+
+Tabs are File (Open/Save/Save As/Print), Home (document/Print, history, text, fit), Pages (order, structural
+rotation, deletion), View (zoom, sizing, modes, visual rotation, sidebar), and Tools (find/copy).
+Home is initially selected. There are no placeholder tools. Each tab owns a horizontally scrolling
+row of groups. Tab changes never call the viewer or edit model and keep the command area's height
+stable. The bottom bar shows lifecycle status, current/total pages with the existing page editor and
+previous/next controls, effective zoom percentage plus fit mode, and display mode. Fixed status fields
+remain readable while long lifecycle messages ellipsize with a tooltip. The centered empty-state card
+provides an actionable Open PDF button and local-first guidance. Sidebar header, inset borders and
+selected tabs share the ribbon palette; resizing preserves the sidebar width.
+
+Existing ToolStripItems are lightweight command sources with their original handlers and enabled/
+checked states. A nonvisual owned ToolStrip retains those sources. Ribbon buttons borrow them,
+call `PerformClick`, and reflect both item and parent menu availability. Shortcuts continue invoking
+the same workflow methods. Save and structural commands retain guards, extended to active printing.
+Duplicate presentations share handlers rather than PDF/persistence logic.
+
+Thumbnails and Outline retain their existing controls, splitter, F4, virtualization and cleanup.
+The navigation heading, tabs, viewer background and thumbnail selection colors are themed. The
+thumbnail ImageList remains empty and supplies only its existing row-height metric; icons and
+thumbnails are never added. The window title still uses the saved filename and dirty asterisk.
+
+`CommandIcons` implements the original GPLv3 **MauriPDF Line** family as geometry on a 24-unit grid.
+GDI+ rasterizes it into cached Bitmaps keyed by icon and pixel size; no external SVG renderer, icon
+font, asset dependency or package is required. MainForm owns one cache and theme. Controls borrow
+Images/Fonts; form disposal releases controls and command sources first, then shared images/fonts.
+Painting uses scoped Pens/Brushes; RibbonHost owns its tooltip. Document replacement and tab switches
+do not recreate those resources.
+
+PerMonitorV2, DPI autoscaling, point-sized fonts and logical 96-DPI dimensions form the DPI foundation.
+Command buttons request cached icons and explicitly recompute command/group/header dimensions at their
+current DeviceDpi on handle creation and parent DPI changes. Status columns scale similarly. Layout and
+horizontal command scrolling accommodate small windows. Real mixed-monitor 125%/150% transitions and
+high-contrast polish remain milestone 3 work; thumbnail row metrics and viewer geometry are unchanged.
+
+`MauriPDF.App.Tests` links presentation components into a Windows test assembly and checks command
+routing, disabled/parent states, tab isolation, cache reuse and borrowed-image disposal. The ignored
+`artifacts/continuous-view-check` harness exercises MainForm handles, tabs, 850/1180 resize, Save/Save As,
+dirty title/history, 1,001-page viewer behavior, search, sidebar, replacement and repeated disposal,
+without touching the clipboard. Print tests cover range validation, hardware margins, raster budget,
+immutable edited order/rotation and per-page disposal. The harness substitutes only the print workflow
+to verify Ctrl+P, availability, busy guards and unchanged revision/dirty state without spooling a job.
+Screenshots were reviewed at 125% DPI; real mixed-monitor transitions and high-contrast remain unverified.
+
+## Printing
+
+`MainForm.Printing.cs` captures source path, current logical page and an immutable `PdfMaterializationPlan`.
+The App-owned `IPdfPrintWorkflow`/`PdfPrintWorkflow` presents the standard Windows PrintDialog with all,
+current and contiguous page-range choices. File/Home Print and Ctrl+P share the same command. Source
+replacement, close, structural edits, Undo/Redo and saving are blocked during the job; viewing remains
+available. Printing does not change the source, saved destination, revision or dirty baseline.
+
+An independent background STA owns `PdfPrintDocument`, its renderer and render session. It uses the
+existing Rendering boundary and shared PDFium native gate, not viewer caches or direct PDFium bindings.
+Each requested logical page resolves to its snapshot source index and structural rotation; deleted pages
+are omitted and view-only rotation/zoom/selection/search are excluded. Only one page is rasterized at a
+time through the neutral `RenderedPage` boundary, converted to an App Bitmap and drawn to the printer.
+Both buffers are disposed immediately after drawing; session/renderer are released on end or failure.
+
+Pages are centered and aspect-fitted within 0.35-inch margins intersected with the hardware printable
+area. Coordinates account for the [PrintDocument hardware-origin behavior](https://learn.microsoft.com/en-us/dotnet/api/system.drawing.printing.printdocument.originatmargins?view=windowsdesktop-10.0).
+Raster output targets 300 DPI, capped at 8,388,608 pixels per page (up to 32 MiB each for neutral pixels
+and the GDI Bitmap, excluding PDFium/driver allocations). This is not vector printing or a total native
+memory guarantee. Driver-selected paper/orientation applies to the job; no automatic mixed-paper
+selection, print preview or disjoint range syntax is provided. Driver copies/duplex settings are delegated
+to Windows. Printing may contend with viewing for the existing native gate.
+
+Progress is cancellable between pages; an active native render/driver call cannot be interrupted, and
+already-spooled output may still print. Errors return to the UI without changing document state. Tests
+do not submit physical or virtual printer jobs; actual driver output still requires manual validation.
+Explicit printing hands page images to the user-selected Windows printer/spooler; see privacy.md.
+
 ## Goals
 
 MauriPDF is designed as a fast, lightweight Windows PDF application with strict local-only document handling. The architecture protects the UI and application logic from concrete PDF libraries while avoiding abstractions that are not supported by an implemented use case.

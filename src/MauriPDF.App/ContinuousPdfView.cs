@@ -32,7 +32,7 @@ internal sealed partial class ContinuousPdfView : Control
     {
         _renderer = renderer;
         Dock = DockStyle.Fill;
-        BackColor = Color.DarkGray;
+        BackColor = Presentation.MauriPdfTheme.Workspace;
         TabStop = true;
         AccessibleName = "PDF document";
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
@@ -59,6 +59,16 @@ internal sealed partial class ContinuousPdfView : Control
 
     public event Action<int>? CurrentPageChanged;
     public event Action<Exception>? RenderFailed;
+    public event Action? PresentationLayoutChanged;
+    public double? DisplayedZoomPercent
+    {
+        get
+        {
+            if (_layout is null || _state is null || _sizes is null || !_layout.ContainsPage(_state.PageIndex)) return null;
+            PdfPageSize size = _layout.RotationForPage(_state.PageIndex).EffectiveSize(_sizes[SourcePageIndex(_state.PageIndex)]);
+            return _layout[_state.PageIndex].Width / (size.WidthPoints * 96.0 / 72) * 100;
+        }
+    }
     private int ViewWidth => Math.Max(1, ClientSize.Width - _vertical.Width);
     private int ViewHeight => Math.Max(1, ClientSize.Height - _horizontal.Height);
     private double MinTop => _layout?.MinimumScrollTop(ViewHeight) ?? 0;
@@ -168,6 +178,7 @@ internal sealed partial class ContinuousPdfView : Control
                 _left = 0;
             }
             MoveTo(_top, _left);
+            PresentationLayoutChanged?.Invoke();
         }
         catch (Exception exception) { RenderFailed?.Invoke(exception); }
     }

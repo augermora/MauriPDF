@@ -6,6 +6,25 @@ The project is privacy-first and local-first: it requires no account, includes n
 
 ## Status
 
+The application shell uses a compact **File / Home / Pages / View / Tools** ribbon-style command area,
+original MauriPDF line icons, a resizable Thumbnails/Outline navigation pane, and a bottom status bar
+with page navigation, zoom, and display mode. The shell shares a Segoe UI typography and blue/slate
+theme, preserves existing shortcuts, and supports native Windows DPI scaling. At narrow sizes the
+command area scrolls horizontally without shrinking the document workspace further.
+
+The refined ribbon combines emphasized primary commands, compact two-row secondary commands,
+framed captioned groups and clearly selected tabs/toggles. The navigation pane shares its styling;
+a centered Open PDF card welcomes new documents. Dedicated status fields retain page navigation,
+effective zoom percentage and display mode while long messages truncate with a tooltip.
+
+**Print** (File/Home or Ctrl+P) opens the standard Windows print dialog for all pages, the current
+page or a contiguous range. Output respects unsaved page order, deletions and structural rotations,
+but excludes view-only rotation and selection/search overlays. Printing never saves or changes the
+document. Pages are rasterized individually at up to 300 DPI with an 8-megapixel per-page cap and
+fitted to the selected paper's printable area. No print preview or vector printing is provided.
+Cancellation takes effect between pages; already-spooled pages may still print. Explicit printing
+hands rendered pages to the selected Windows printer/driver, which may be a network printer.
+
 MauriPDF is in early development. The `0.1-alpha.1` milestone is focused on opening a local PDF, determining its page count, rendering and navigating pages, zooming, fitting a page to the available width, and closing the document.
 
 The viewer uses PDFium through PDFiumCore and supports local PDF opening, mixed-size pages, previous/next and direct page navigation, 25–500% manual zoom, Fit Page, Fit Width, and independent document/sidebar scrolling. Opening and rendering run on a serialized background worker. Only a bounded visible range is rendered, with latest-viewport-wins scheduling, a 64 MiB neutral LRU cache, and separate bounded UI Bitmaps. Pages keep their layout as placeholders while loading; zoom preserves the approximate reading position. The collapsible thumbnail sidebar keeps its lazy rendering and separate 8 MiB cache.

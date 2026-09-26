@@ -31,6 +31,8 @@ internal sealed class ThumbnailListView : ListView
     {
         _renderer = renderer;
         Dock = DockStyle.Fill;
+        BorderStyle = BorderStyle.None;
+        BackColor = Presentation.MauriPdfTheme.Panel;
         View = View.Details;
         HeaderStyle = ColumnHeaderStyle.None;
         VirtualMode = true;
@@ -148,7 +150,13 @@ internal sealed class ThumbnailListView : ListView
     protected override void OnDrawSubItem(DrawListViewSubItemEventArgs e)
     {
         bool selected = e.ItemIndex == _current;
-        e.Graphics.FillRectangle(selected ? SystemBrushes.Highlight : SystemBrushes.Window, e.Bounds);
+        using SolidBrush background = new(selected ? Presentation.MauriPdfTheme.Selected : Presentation.MauriPdfTheme.Panel);
+        e.Graphics.FillRectangle(background, e.Bounds);
+        if (selected)
+        {
+            using Pen selection = new(Presentation.MauriPdfTheme.Accent, 2);
+            e.Graphics.DrawRectangle(selection, e.Bounds.X + 1, e.Bounds.Y + 1, Math.Max(1, e.Bounds.Width - 3), e.Bounds.Height - 3);
+        }
         Rectangle area = new(e.Bounds.X + 8, e.Bounds.Y + 6, Math.Max(1, e.Bounds.Width - 16), RowHeight - 30);
         if (_images.TryGetValue(e.ItemIndex, out Bitmap? image))
         {
@@ -166,7 +174,7 @@ internal sealed class ThumbnailListView : ListView
 
         TextRenderer.DrawText(e.Graphics, (e.ItemIndex + 1).ToString(CultureInfo.InvariantCulture), Font,
             new Rectangle(e.Bounds.X, e.Bounds.Bottom - 24, e.Bounds.Width, 22),
-            selected ? SystemColors.HighlightText : SystemColors.WindowText,
+            Presentation.MauriPdfTheme.Ink,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         CheckVisibleRange();
     }

@@ -20,3 +20,11 @@ MauriPDF is privacy-first and local-first.
 - Review every dependency for network behavior, telemetry, licensing, and distribution implications before adoption.
 
 If a future feature could transmit user data, it requires an explicit architectural and product decision and must not weaken the local-only guarantees of ordinary document use.
+
+## Explicit printing
+
+Viewing, editing and saving do not upload documents or contact a service. The user-requested Print
+feature explicitly passes rendered page images and the document name to the selected Windows
+printer/spooler. Windows drivers can retain spool data or send it to a network printer; that output
+is controlled by the user's printer choice and Windows configuration, not a MauriPDF cloud service.
+MauriPDF never prints automatically. Cancel cannot recall pages already accepted by the spooler.

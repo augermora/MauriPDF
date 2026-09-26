@@ -18,6 +18,8 @@ internal sealed partial class ContinuousPdfView
     private bool _selectionReady;
 
     public event Action<string>? SelectionStatusChanged;
+    public event Action? SelectionAvailabilityChanged;
+    public bool CanCopySelection => _selectionReady && _selection is { IsEmpty: false };
 
     private readonly record struct PageTextPoint(int Page, TextPoint Point, int Width, int Height);
 
@@ -154,6 +156,7 @@ internal sealed partial class ContinuousPdfView
                 int endOffset = endText.HitTest(end.Point, end.Width, end.Height, double.PositiveInfinity) ?? 0;
                 _selection = new TextSelection(_textAnchor.Value, new TextPosition(end.Page, endOffset));
                 _selectionReady = true;
+                SelectionAvailabilityChanged?.Invoke();
                 SelectionStatusChanged?.Invoke(string.Empty);
                 Invalidate();
                 return;
@@ -196,6 +199,7 @@ internal sealed partial class ContinuousPdfView
         _textPages.Clear();
         _selectionReady = false;
         _draggingText = false;
+        SelectionAvailabilityChanged?.Invoke();
         Capture = false;
         Invalidate();
     }
