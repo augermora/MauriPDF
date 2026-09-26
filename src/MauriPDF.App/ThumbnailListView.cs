@@ -8,6 +8,7 @@ namespace MauriPDF.App;
 internal sealed class ThumbnailListView : ListView
 {
     private const int RowHeight = 244;
+    private int DeviceRowHeight => Presentation.DisplayMetrics.ThumbnailRowHeight(DeviceDpi);
     private const int MaximumVisibleImages = 32;
     private readonly PdfViewerRenderer _renderer;
     private readonly Dictionary<int, Bitmap> _images = [];
@@ -154,10 +155,12 @@ internal sealed class ThumbnailListView : ListView
         e.Graphics.FillRectangle(background, e.Bounds);
         if (selected)
         {
-            using Pen selection = new(Presentation.MauriPdfTheme.Accent, 2);
+            using Pen selection = new(SystemInformation.HighContrast ? Presentation.MauriPdfTheme.SelectedText : Presentation.MauriPdfTheme.Accent, 2);
             e.Graphics.DrawRectangle(selection, e.Bounds.X + 1, e.Bounds.Y + 1, Math.Max(1, e.Bounds.Width - 3), e.Bounds.Height - 3);
         }
-        Rectangle area = new(e.Bounds.X + 8, e.Bounds.Y + 6, Math.Max(1, e.Bounds.Width - 16), RowHeight - 30);
+        int inset = Presentation.DisplayMetrics.Scale(8, DeviceDpi);
+        int caption = Presentation.DisplayMetrics.Scale(30, DeviceDpi);
+        Rectangle area = new(e.Bounds.X + inset, e.Bounds.Y + inset, Math.Max(1, e.Bounds.Width - 2 * inset), Math.Max(1, e.Bounds.Height - caption - inset));
         if (_images.TryGetValue(e.ItemIndex, out Bitmap? image))
         {
             double scale = Math.Min(1, Math.Min((double)area.Width / image.Width, (double)area.Height / image.Height));
@@ -167,15 +170,18 @@ internal sealed class ThumbnailListView : ListView
         }
         else
         {
-            Rectangle placeholder = new(area.X + Math.Max(0, (area.Width - 120) / 2), area.Y, Math.Min(120, area.Width), 165);
+            int height = Math.Min(area.Height, Presentation.DisplayMetrics.Scale(165, DeviceDpi));
+            int width = Math.Min(area.Width, height * 120 / 165);
+            Rectangle placeholder = new(area.X + Math.Max(0, (area.Width - width) / 2), area.Y, width, height);
             e.Graphics.FillRectangle(SystemBrushes.Control, placeholder);
             e.Graphics.DrawRectangle(SystemPens.ControlDark, placeholder);
         }
 
         TextRenderer.DrawText(e.Graphics, (e.ItemIndex + 1).ToString(CultureInfo.InvariantCulture), Font,
-            new Rectangle(e.Bounds.X, e.Bounds.Bottom - 24, e.Bounds.Width, 22),
-            Presentation.MauriPdfTheme.Ink,
+            new Rectangle(e.Bounds.X, e.Bounds.Bottom - caption, e.Bounds.Width, caption),
+            selected ? Presentation.MauriPdfTheme.SelectedText : Presentation.MauriPdfTheme.Ink,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+        if (Focused && e.Item?.Focused == true) ControlPaint.DrawFocusRectangle(e.Graphics, Rectangle.Inflate(e.Bounds, -3, -3));
         CheckVisibleRange();
     }
 
@@ -192,11 +198,24 @@ internal sealed class ThumbnailListView : ListView
         if (_ready && Columns.Count > 0) Columns[0].Width = Math.Max(1, ClientSize.Width - SystemInformation.VerticalScrollBarWidth - 4);
     }
 
+    private void UpdateDpiMetrics()
+    {
+        if (!_ready || _disposed) return;
+        int top = TopItem?.Index ?? 0;
+        _rowSizer.ImageSize = new Size(1, DeviceRowHeight); // Empty: no image lifetime can cross handle recreation.
+        if (IsHandleCreated && VirtualListSize > 0) TopItem = Items[Math.Min(top, VirtualListSize - 1)];
+        _lastTop = _lastCount = -1;
+        CheckVisibleRange();
+        Invalidate();
+    }
+    protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); UpdateDpiMetrics(); }
+    protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); UpdateDpiMetrics(); }
+
     private void CheckVisibleRange()
     {
         if (!_ready || _disposed || !_active || !IsHandleCreated || VirtualListSize == 0) return;
         int top = TopItem?.Index ?? 0;
-        int count = Math.Min(MaximumVisibleImages, Math.Min(VirtualListSize - top, ClientSize.Height / RowHeight + 2));
+        int count = Math.Min(MaximumVisibleImages, Math.Min(VirtualListSize - top, ClientSize.Height / DeviceRowHeight + 2));
         if (top == _lastTop && count == _lastCount) return;
         _lastTop = top;
         _lastCount = count;

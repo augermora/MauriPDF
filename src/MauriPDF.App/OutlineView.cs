@@ -14,6 +14,8 @@ internal sealed class OutlineView : UserControl
     public OutlineView()
     {
         Dock = DockStyle.Fill;
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96, 96);
         BackColor = Presentation.MauriPdfTheme.Panel;
         _tree.BorderStyle = BorderStyle.None;
         _tree.BackColor = Presentation.MauriPdfTheme.Panel;

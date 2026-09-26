@@ -9,6 +9,7 @@ internal sealed class RibbonCommandButton : Button
     private readonly bool _large;
     private bool _selected, _hover, _pressed;
     public bool IsLarge => _large;
+    public bool IsSelected => _selected;
 
     public RibbonCommandButton(ToolStripItem command, string label, CommandIcon icon, bool large,
         MauriPdfTheme theme, CommandIcons icons, ToolTip tooltip)
@@ -16,6 +17,7 @@ internal sealed class RibbonCommandButton : Button
         _command = command; _icons = icons; _icon = icon; _large = large;
         Text = label;
         AccessibleName = command.AccessibleName ?? command.Text ?? label;
+        AccessibleRole = AccessibleRole.PushButton;
         Font = theme.Body;
         FlatStyle = FlatStyle.Flat;
         FlatAppearance.BorderSize = 0;
@@ -34,7 +36,8 @@ internal sealed class RibbonCommandButton : Button
     private void SetIcon()
     {
         float scale = DeviceDpi / 96F;
-        Image = _icons.Get(_icon, Math.Max(1, (int)((_large ? MauriPdfTheme.LargeIcon : MauriPdfTheme.SmallIcon) * scale)));
+        Image = _icons.Get(_icon, DisplayMetrics.Scale(_large ? MauriPdfTheme.LargeIcon : MauriPdfTheme.SmallIcon, DeviceDpi),
+            !Enabled ? MauriPdfTheme.Disabled : _selected && SystemInformation.HighContrast ? MauriPdfTheme.SelectedText : MauriPdfTheme.Ink);
         Size = new((int)((_large ? MauriPdfTheme.LargeCommandWidth : MauriPdfTheme.CompactCommandWidth) * scale),
             (int)((_large ? MauriPdfTheme.CommandHeight * 2 + 2 : MauriPdfTheme.CommandHeight) * scale));
         Margin = new Padding(Math.Max(1, (int)scale));
@@ -56,24 +59,41 @@ internal sealed class RibbonCommandButton : Button
         bool changed = Enabled != enabled || _selected != selected;
         Enabled = enabled; _selected = selected;
         AccessibleDescription = selected ? "Selected" : null;
-        if (changed) Invalidate();
+        SetIcon();
+        if (changed) { AccessibilityNotifyClients(AccessibleEvents.StateChange, -1); Invalidate(); }
     }
+
+    protected override AccessibleObject CreateAccessibilityInstance() => new CommandAccessibleObject(this);
+    private sealed class CommandAccessibleObject(RibbonCommandButton owner) : ControlAccessibleObject(owner)
+    {
+        public override AccessibleStates State => base.State | (owner.IsSelected ? AccessibleStates.Pressed | AccessibleStates.Checked : AccessibleStates.None);
+        public override string DefaultAction => "Press";
+        public override void DoDefaultAction() { if (owner.Enabled) owner.PerformClick(); }
+    }
+    protected override void OnEnter(EventArgs e)
+    {
+        base.OnEnter(e);
+        for (Control? parent = Parent; parent is not null; parent = parent.Parent)
+            if (parent is FlowLayoutPanel { AutoScroll: true } row) row.ScrollControlIntoView(Parent!.Parent!);
+        Invalidate();
+    }
+    protected override void OnLeave(EventArgs e) { base.OnLeave(e); _pressed = false; Invalidate(); }
 
     protected override void OnPaint(PaintEventArgs e)
     {
         float scale = DeviceDpi / 96F;
         bool primary = _large && _icon is CommandIcon.Open or CommandIcon.Print;
-        Color background = !Enabled ? MauriPdfTheme.Group : _pressed ? MauriPdfTheme.Pressed
-            : _selected ? MauriPdfTheme.Selected : _hover ? MauriPdfTheme.Hover : primary ? MauriPdfTheme.Selected : MauriPdfTheme.Group;
+        Color background = !Enabled ? MauriPdfTheme.Group : _pressed && !SystemInformation.HighContrast ? MauriPdfTheme.Pressed
+            : _selected ? MauriPdfTheme.Selected : _hover ? MauriPdfTheme.Hover : primary && !SystemInformation.HighContrast ? MauriPdfTheme.Selected : MauriPdfTheme.Group;
         e.Graphics.Clear(background);
-        if (_selected || _hover || primary && Enabled)
+        if (_selected || _hover || _pressed || primary && Enabled)
         {
-            using Pen edge = new(_selected ? MauriPdfTheme.Accent : MauriPdfTheme.Border);
+            using Pen edge = new(_selected && SystemInformation.HighContrast ? MauriPdfTheme.SelectedText : _selected ? MauriPdfTheme.Accent : MauriPdfTheme.Border);
             e.Graphics.DrawRectangle(edge, 0, 0, Width - 1, Height - 1);
         }
         if (_selected)
         {
-            using SolidBrush marker = new(MauriPdfTheme.Accent);
+            using SolidBrush marker = new(SystemInformation.HighContrast ? MauriPdfTheme.SelectedText : MauriPdfTheme.Accent);
             e.Graphics.FillRectangle(marker, 0, 0, 3 * scale, Height);
         }
         int gap = (int)(7 * scale);
@@ -81,15 +101,16 @@ internal sealed class RibbonCommandButton : Button
         Point origin = _large ? new((Width - icon.Width) / 2, (int)(4 * scale)) : new(gap, (Height - icon.Height) / 2);
         if (Image is not null)
         {
-            if (Enabled) e.Graphics.DrawImageUnscaled(Image, origin);
+            if (Enabled || SystemInformation.HighContrast) e.Graphics.DrawImageUnscaled(Image, origin);
             else ControlPaint.DrawImageDisabled(e.Graphics, Image, origin.X, origin.Y, background);
         }
         Rectangle text = _large ? new(2, origin.Y + icon.Height + 1, Width - 4, Height - origin.Y - icon.Height - 2)
             : new(origin.X + icon.Width + gap, 0, Math.Max(1, Width - origin.X - icon.Width - gap - 3), Height);
-        TextRenderer.DrawText(e.Graphics, Text, Font, text, Enabled ? MauriPdfTheme.Ink : MauriPdfTheme.Disabled,
+        Color foreground = !Enabled ? MauriPdfTheme.Disabled : _selected ? MauriPdfTheme.SelectedText : MauriPdfTheme.Ink;
+        TextRenderer.DrawText(e.Graphics, Text, Font, text, foreground,
             TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix
             | (_large ? TextFormatFlags.HorizontalCenter : TextFormatFlags.Left));
-        if (Focused && ShowFocusCues) ControlPaint.DrawFocusRectangle(e.Graphics, Rectangle.Inflate(ClientRectangle, -3, -3));
+        if (Focused) ControlPaint.DrawFocusRectangle(e.Graphics, Rectangle.Inflate(ClientRectangle, -3, -3), foreground, background);
     }
 }
 
@@ -104,7 +125,7 @@ internal sealed class RibbonGroup : Panel
         Margin = new Padding(0, 0, 6, 0);
         Padding = new Padding(3, 2, 3, 1);
         Controls.Add(Commands);
-        _caption = new Label { Text = caption, Dock = DockStyle.Bottom, Height = 16,
+        _caption = new Label { Text = caption, UseMnemonic = false, AutoEllipsis = true, Dock = DockStyle.Bottom, Height = 16,
             TextAlign = ContentAlignment.MiddleCenter, BackColor = MauriPdfTheme.GroupCaption,
             ForeColor = MauriPdfTheme.Muted, Font = theme.Caption };
         Controls.Add(_caption);
@@ -118,6 +139,14 @@ internal sealed class RibbonGroup : Panel
         Height = (int)(MauriPdfTheme.RibbonGroupHeight * scale);
         _caption.Height = (int)(16 * scale);
         Padding = new Padding((int)(3 * scale), (int)(2 * scale), (int)(3 * scale), 1);
+        Margin = new Padding(0, 0, DisplayMetrics.Scale(6, DeviceDpi), 0);
+    }
+    public void ApplyTheme()
+    {
+        BackColor = Commands.BackColor = MauriPdfTheme.Group;
+        _caption.BackColor = MauriPdfTheme.GroupCaption; _caption.ForeColor = MauriPdfTheme.Muted;
+        foreach (RibbonCommandButton button in Commands.Controls) { button.RefreshCommand(); button.Invalidate(); }
+        Invalidate();
     }
     protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); UpdateMetrics(); }
     protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); UpdateMetrics(); }
@@ -148,6 +177,7 @@ internal sealed class RibbonHost : UserControl
         AutoScaleMode = AutoScaleMode.Dpi; AutoScaleDimensions = new SizeF(96, 96);
         Dock = DockStyle.Top; Height = MauriPdfTheme.RibbonHeight;
         Font = theme.Body; BackColor = MauriPdfTheme.Panel;
+        _headers.TabIndex = 0; _content.TabIndex = 1;
         Controls.Add(_content); Controls.Add(_headers);
     }
 
@@ -161,9 +191,11 @@ internal sealed class RibbonHost : UserControl
         {
             _pages[i].Visible = i == index;
             _tabs[i].BackColor = i == index ? MauriPdfTheme.Selected : MauriPdfTheme.Panel;
-            _tabs[i].ForeColor = i == index ? MauriPdfTheme.Accent : MauriPdfTheme.Muted;
+            _tabs[i].ForeColor = i == index ? MauriPdfTheme.SelectedText : MauriPdfTheme.Muted;
             _tabs[i].Font = i == index ? _theme.Heading : _theme.Body;
             _tabs[i].AccessibleDescription = i == index ? "Selected tab" : null;
+            _tabs[i].TabStop = i == index;
+            ((RibbonTabButton)_tabs[i]).Selected = i == index;
             _tabs[i].Invalidate();
         }
     }
@@ -171,7 +203,7 @@ internal sealed class RibbonHost : UserControl
     public FlowLayoutPanel AddTab(string name)
     {
         int index = _pages.Count;
-        Button header = new() { Text = name, AccessibleName = $"{name} commands", AccessibleRole = AccessibleRole.PageTab,
+        Button header = new RibbonTabButton() { Text = name, AccessibleName = $"{name} commands", AccessibleRole = AccessibleRole.PageTab,
             FlatStyle = FlatStyle.Flat, Size = new(66, MauriPdfTheme.TabHeight - 2), Margin = new Padding(0, 0, 2, 0) };
         header.FlatAppearance.BorderSize = 0;
         header.FlatAppearance.MouseOverBackColor = MauriPdfTheme.Hover;
@@ -180,7 +212,7 @@ internal sealed class RibbonHost : UserControl
         header.Paint += (_, e) =>
         {
             if (SelectedTab != index) return;
-            using Pen pen = new(MauriPdfTheme.Accent, Math.Max(2, DeviceDpi / 48F));
+            using Pen pen = new(SystemInformation.HighContrast ? MauriPdfTheme.SelectedText : MauriPdfTheme.Accent, Math.Max(2, DeviceDpi / 48F));
             e.Graphics.DrawLine(pen, 8, header.Height - 2, header.Width - 8, header.Height - 2);
         };
         header.KeyDown += (_, e) =>
@@ -212,32 +244,73 @@ internal sealed class RibbonHost : UserControl
         _buttons.Add(button);
     }
     public void RefreshCommands() { foreach (RibbonCommandButton button in _buttons) button.RefreshCommand(); }
+    public void FocusSelectedTab() { if (SelectedTab >= 0) _tabs[SelectedTab].Focus(); }
+    public void ApplyTheme()
+    {
+        BackColor = _headers.BackColor = _content.BackColor = MauriPdfTheme.Panel;
+        foreach (FlowLayoutPanel page in _pages)
+        {
+            page.BackColor = MauriPdfTheme.Panel;
+            foreach (RibbonGroup group in page.Controls) group.ApplyTheme();
+        }
+        int selected = SelectedTab;
+        SelectedTab = -1;
+        if (selected >= 0) SelectTab(selected);
+    }
     private void UpdateMetrics()
     {
         float scale = DeviceDpi / 96F;
         Height = (int)(MauriPdfTheme.RibbonHeight * scale);
         _headers.Height = (int)(MauriPdfTheme.TabHeight * scale);
         foreach (Button header in _tabs) header.Size = new((int)(66 * scale), (int)((MauriPdfTheme.TabHeight - 2) * scale));
+        _headers.Padding = new Padding(DisplayMetrics.Scale(8, DeviceDpi), 0, 0, 0);
+        _content.Padding = new Padding(DisplayMetrics.Scale(8, DeviceDpi), DisplayMetrics.Scale(3, DeviceDpi), DisplayMetrics.Scale(8, DeviceDpi), 0);
     }
     protected override void OnHandleCreated(EventArgs e) { base.OnHandleCreated(e); UpdateMetrics(); }
     protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); UpdateMetrics(); }
     protected override void Dispose(bool disposing) { if (disposing) _tooltip.Dispose(); base.Dispose(disposing); }
 }
 
+internal sealed class RibbonTabButton : Button
+{
+    private bool _selected;
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public bool Selected
+    {
+        get => _selected;
+        set { if (_selected == value) return; _selected = value; AccessibilityNotifyClients(AccessibleEvents.StateChange, -1); }
+    }
+    protected override AccessibleObject CreateAccessibilityInstance() => new TabAccessibleObject(this);
+    private sealed class TabAccessibleObject(RibbonTabButton owner) : ControlAccessibleObject(owner)
+    {
+        public override AccessibleStates State => base.State | (owner.Selected ? AccessibleStates.Selected : AccessibleStates.None);
+        public override string DefaultAction => "Select";
+        public override void DoDefaultAction() { if (owner.Enabled) owner.PerformClick(); }
+    }
+}
+
 internal sealed class ShellTabs : TabControl
 {
     public ShellTabs() { DrawMode = TabDrawMode.OwnerDrawFixed; Padding = new Point(14, 7); }
+    private void UpdateMetrics() => Padding = new Point(DisplayMetrics.Scale(12, DeviceDpi), DisplayMetrics.Scale(6, DeviceDpi));
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        // Padding can recreate the native tab handle; never do that inside its creation callback.
+        BeginInvoke(() => { if (!IsDisposed) UpdateMetrics(); });
+    }
+    protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); UpdateMetrics(); }
     protected override void OnDrawItem(DrawItemEventArgs e)
     {
         bool selected = e.Index == SelectedIndex;
         using SolidBrush background = new(selected ? MauriPdfTheme.Selected : MauriPdfTheme.Group);
         e.Graphics.FillRectangle(background, e.Bounds);
         TextRenderer.DrawText(e.Graphics, TabPages[e.Index].Text, Font, e.Bounds,
-            selected ? MauriPdfTheme.Accent : MauriPdfTheme.Muted,
+            selected ? MauriPdfTheme.SelectedText : MauriPdfTheme.Muted,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         if (selected)
         {
-            using Pen pen = new(MauriPdfTheme.Accent, Math.Max(2, DeviceDpi / 48F));
+            using Pen pen = new(SystemInformation.HighContrast ? MauriPdfTheme.SelectedText : MauriPdfTheme.Accent, Math.Max(2, DeviceDpi / 48F));
             e.Graphics.DrawLine(pen, e.Bounds.Left + 3, e.Bounds.Bottom - 2, e.Bounds.Right - 3, e.Bounds.Bottom - 2);
         }
         if (Focused && selected) ControlPaint.DrawFocusRectangle(e.Graphics, Rectangle.Inflate(e.Bounds, -3, -3));

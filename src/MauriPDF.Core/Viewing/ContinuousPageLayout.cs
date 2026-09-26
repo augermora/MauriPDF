@@ -22,24 +22,27 @@ public sealed class ContinuousPageLayout
     private readonly PageGeometry[] _pages;
     private readonly int _firstPage;
     private readonly IReadOnlyList<LogicalPageReference>? _logicalPages;
+    private readonly int _gap;
     public VisualRotation Rotation { get; }
     public ViewerDisplayMode DisplayMode { get; }
 
     public ContinuousPageLayout(IReadOnlyList<PdfPageSize> pages, ViewerState state, int width, int height,
-        IReadOnlyList<LogicalPageReference>? logicalPages = null)
+        IReadOnlyList<LogicalPageReference>? logicalPages = null, double displayDpi = 96)
     {
         ArgumentNullException.ThrowIfNull(pages);
+        if (!double.IsFinite(displayDpi) || displayDpi <= 0) throw new ArgumentOutOfRangeException(nameof(displayDpi));
+        _gap = Math.Max(1, checked((int)Math.Round(Gap * displayDpi / 96)));
         if ((logicalPages?.Count ?? pages.Count) != state.PageCount) throw new ArgumentException("Page count mismatch.", nameof(pages));
         _logicalPages = logicalPages;
-        int availableWidth = Math.Max(1, width - 2 * Gap);
-        int availableHeight = Math.Max(1, height - 2 * Gap);
+        int availableWidth = Math.Max(1, width - 2 * _gap);
+        int availableHeight = Math.Max(1, height - 2 * _gap);
         Rotation = state.Rotation;
         DisplayMode = state.DisplayMode;
         _firstPage = DisplayMode == ViewerDisplayMode.SinglePage ? state.PageIndex : 0;
         PdfPageSize reference = RotationForPage(state.PageIndex).EffectiveSize(pages[SourcePageIndex(state.PageIndex)]);
         double fitScale = Math.Min(availableWidth / reference.WidthPoints, availableHeight / reference.HeightPoints);
         _pages = new PageGeometry[DisplayMode == ViewerDisplayMode.SinglePage ? 1 : state.PageCount];
-        double top = Gap;
+        double top = _gap;
         for (int offset = 0; offset < _pages.Length; offset++)
         {
             int index = _firstPage + offset;
@@ -50,14 +53,14 @@ public sealed class ContinuousPageLayout
             {
                 ViewerZoomMode.FitWidth => availableWidth / page.WidthPoints,
                 ViewerZoomMode.FitPage => fitScale,
-                _ => 96.0 / 72 * state.ZoomPercent / 100
+                _ => displayDpi / 72 * state.ZoomPercent / 100
             };
             int w = Math.Max(1, checked((int)Math.Round(page.WidthPoints * scale)));
             int h = Math.Max(1, checked((int)Math.Round(page.HeightPoints * scale)));
-            if (DisplayMode == ViewerDisplayMode.SinglePage) top = Math.Max(Gap, (height - h) / 2.0);
+            if (DisplayMode == ViewerDisplayMode.SinglePage) top = Math.Max(_gap, (height - h) / 2.0);
             _pages[offset] = new(index, w, h, top);
-            Width = Math.Max(Width, (double)w + 2 * Gap);
-            top += h + Gap;
+            Width = Math.Max(Width, (double)w + 2 * _gap);
+            top += h + _gap;
         }
         Height = DisplayMode == ViewerDisplayMode.SinglePage ? Math.Max(height, top) : top;
     }

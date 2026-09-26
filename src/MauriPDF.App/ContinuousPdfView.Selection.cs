@@ -122,7 +122,7 @@ internal sealed partial class ContinuousPdfView
             }
             if (_textAnchor is null)
             {
-                int? hit = anchorText.HitTest(anchor.Point, anchor.Width, anchor.Height, 6);
+                int? hit = anchorText.HitTest(anchor.Point, anchor.Width, anchor.Height, Presentation.DisplayMetrics.Scale(6, DeviceDpi));
                 if (hit is null)
                 {
                     ClearSelection(); // Blank or image-only page: no selection and no clipboard action.
@@ -186,6 +186,9 @@ internal sealed partial class ContinuousPdfView
             TextBounds mapped = TextCoordinateTransform.ToDisplay(box, display.Left, display.Top, display.Width, display.Height, _layout!.RotationForPage(page));
             graphics.FillRectangle(_selectionBrush, (float)mapped.Left, (float)mapped.Top,
                 (float)(mapped.Right - mapped.Left), (float)(mapped.Bottom - mapped.Top));
+            if (SystemInformation.HighContrast)
+                graphics.DrawRectangle(SystemPens.Highlight, (float)mapped.Left, (float)mapped.Top,
+                    (float)(mapped.Right - mapped.Left), (float)(mapped.Bottom - mapped.Top));
         }
     }
 

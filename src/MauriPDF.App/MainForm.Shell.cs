@@ -16,6 +16,8 @@ internal sealed partial class MainForm
     private readonly ToolStripButton _showThumbnails = new("Thumbnails");
     private readonly ToolStripButton _showOutline = new("Outline");
     private ShellStatusBar? _statusBar;
+    private Label _brand = null!;
+    private Label _navigationHeading = null!;
 
     private void InitializeShell()
     {
@@ -25,6 +27,14 @@ internal sealed partial class MainForm
         BackColor = MauriPdfTheme.Background;
         ForeColor = MauriPdfTheme.Ink;
         ClientSize = new Size(1180, 780);
+        _open.AccessibleName = "Open PDF"; _open.ToolTipText = "Open a local PDF (Ctrl+O)";
+        _save.AccessibleName = "Save document"; _saveAs.AccessibleName = "Save document as";
+        _rotateLeft.AccessibleName = "Rotate view counter-clockwise";
+        _rotateRight.AccessibleName = "Rotate view clockwise";
+        _zoomIn.AccessibleName = "Zoom in"; _zoomOut.AccessibleName = "Zoom out";
+        _resetZoom.AccessibleName = "Actual size, 100 percent zoom";
+        _showThumbnails.AccessibleName = "Show thumbnails"; _showOutline.AccessibleName = "Show document outline";
+        _copy.AccessibleName = "Copy selection";
         _find.Click += (_, _) => _searchBar.OpenSearch();
         _print.Click += async (_, _) => await PrintAsync();
         _copy.Click += (_, _) => _viewport.CopySelection();
@@ -97,7 +107,7 @@ internal sealed partial class MainForm
         _ribbon.Add(reading, _copy, "Copy selection", CommandIcon.Copy);
         _ribbon.SelectTab(1);
 
-        Label brand = new() { Text = "MauriPDF", Font = _theme.Title, ForeColor = MauriPdfTheme.Panel,
+        Label brand = _brand = new() { Text = "MauriPDF", Font = _theme.Title, ForeColor = MauriPdfTheme.Panel,
             BackColor = MauriPdfTheme.Ink, Dock = DockStyle.Top, Height = MauriPdfTheme.HeaderHeight,
             Padding = new Padding(12, 0, 0, 0), TextAlign = ContentAlignment.MiddleLeft };
         _split.BorderStyle = BorderStyle.None;
@@ -105,12 +115,13 @@ internal sealed partial class MainForm
         _split.SplitterWidth = 4;
         _split.SplitterDistance = MauriPdfTheme.SidebarWidth;
         _split.FixedPanel = FixedPanel.Panel1;
+        _split.SplitterMoved += (_, _) => { if (!_scalingShell) _sidebarLogicalWidth = _split.SplitterDistance * 96.0 / DeviceDpi; };
         _split.Panel1.BackColor = MauriPdfTheme.Group;
         _split.Panel1.Padding = new Padding(5, 0, 5, 5);
         _navigationTabs.Font = _theme.Body;
         _navigationTabs.Padding = new Point(12, 6);
         foreach (TabPage tab in _navigationTabs.TabPages) tab.BackColor = MauriPdfTheme.Panel;
-        Label heading = new() { Text = "Document navigation", Dock = DockStyle.Top, Height = 38,
+        Label heading = _navigationHeading = new() { Text = "Document navigation", AutoEllipsis = true, Dock = DockStyle.Top, Height = 38,
             Font = _theme.Heading, ForeColor = MauriPdfTheme.Ink, BackColor = MauriPdfTheme.Group,
             TextAlign = ContentAlignment.MiddleLeft, Padding = new Padding(12, 0, 0, 0) };
         _split.Panel1.Controls.Add(heading);
@@ -134,6 +145,8 @@ internal sealed partial class MainForm
         Controls.Add(_ribbon);
         Controls.Add(brand);
         Controls.Add(_statusBar);
+        _ribbon.TabIndex = 0; _searchBar.TabIndex = 1; _split.TabIndex = 2; _statusBar.TabIndex = 3;
+        _navigationTabs.AccessibleName = "Document navigation modes";
     }
 
     private void ShowNavigationTab(int index)

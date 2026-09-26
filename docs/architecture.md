@@ -50,8 +50,8 @@ do not recreate those resources.
 PerMonitorV2, DPI autoscaling, point-sized fonts and logical 96-DPI dimensions form the DPI foundation.
 Command buttons request cached icons and explicitly recompute command/group/header dimensions at their
 current DeviceDpi on handle creation and parent DPI changes. Status columns scale similarly. Layout and
-horizontal command scrolling accommodate small windows. Real mixed-monitor 125%/150% transitions and
-high-contrast polish remain milestone 3 work; thumbnail row metrics and viewer geometry are unchanged.
+horizontal command scrolling accommodate small windows. The DPI/accessibility handling below extends
+this foundation without changing document identity, editing, persistence or print resolution.
 
 `MauriPDF.App.Tests` links presentation components into a Windows test assembly and checks command
 routing, disabled/parent states, tab isolation, cache reuse and borrowed-image disposal. The ignored
@@ -61,6 +61,73 @@ without touching the clipboard. Print tests cover range validation, hardware mar
 immutable edited order/rotation and per-page disposal. The harness substitutes only the print workflow
 to verify Ctrl+P, availability, busy guards and unchanged revision/dirty state without spooling a job.
 Screenshots were reviewed at 125% DPI; real mixed-monitor transitions and high-contrast remain unverified.
+
+### DPI, accessibility and resource robustness
+
+`ApplicationHighDpiMode=PerMonitorV2` remains configured in the executable project and is applied by
+`ApplicationConfiguration.Initialize()`. WinForms scales normal bounds and point-sized fonts; custom
+metrics are recalculated from immutable 96-DPI tokens, never from previously scaled bounds.
+`DisplayMetrics` centralizes rounded icon/sidebar/status/empty-state dimensions and the thumbnail cap.
+Ribbon geometry retains its baseline-derived sizing. Native tab padding updates are deferred past
+handle creation because changing padding can recreate that handle.
+
+The viewer captures its neutral reading anchor in `OnDpiChangedBeforeParent`, stops active dragging
+without clearing logical selection, cancels obsolete visible intent, and defers a geometry rebuild until
+after parent layout settles. It retains the source, edited page mapping and search state. Core's geometry
+accepts a numeric `displayDpi` (default 96 for callers/tests); it remains independent of WinForms.
+Manual page pixels = PDF points × displayDpi / 72 × zoom / 100. Page gutters scale with DPI; Fit Width
+and Fit Page use device-pixel viewport dimensions directly, without a second DPI multiplier. The same
+geometry drives hit testing, rotation, selection and search overlays. Existing viewport/cache budgets
+still constrain raster targets. Status zoom divides out display DPI, so 100% does not become 150% merely
+because the monitor changed. Printer geometry/raster resolution does not use screen DPI.
+
+MainForm preserves the sidebar's logical width across DPI changes and reapplies scaled panel minimums.
+Minimum outer window size is 800 × 560 logical pixels, clamped to the current working area. Ribbon rows
+remain fixed-height, horizontally scrollable rather than silently hiding commands; focusing a command
+scrolls its group into view. Status text normally takes remaining width after page/zoom/mode fields;
+below 620 logical pixels it moves above those fields in a two-row layout. Search reserves its query and
+navigation/close commands and constrains the result label, exposing full status via tooltip. Empty-state
+labels wrap to the viewport; its Open button remains keyboard accessible. Dialogs use explicit 96-DPI
+autoscaling baselines. These changes do not alter save/print workflows.
+
+Thumbnail Details rows still use an **empty** ImageList solely to establish native row height. Height is
+`min(round(244 × dpi/96), 256)` device pixels; captions, padding and placeholders scale within that row.
+This deliberately caps thumbnail enlargement at high DPI instead of exceeding managed ImageList limits.
+Visible demand uses the capped row height, remains limited to 32 owned Bitmaps, and offscreen images are
+disposed as before. Neutral thumbnails retain their existing 144-pixel target/512-pixel height cap and
+8 MiB cache: this milestone does not increase thumbnail raster resolution. Native list/tab handle updates
+never transfer thumbnail ownership to ImageList.
+
+The form responds to Windows color/settings/theme messages on its UI thread, avoiding static event
+subscriptions that could retain closed forms. High contrast uses Windows Window/WindowText,
+Highlight/HighlightText and GrayText pairs; custom selected borders, focus marks and icon colors remain
+visible. PDF page colors are not inverted. Search/selection retain their existing translucent fills with
+additional system-color outlines in high contrast (the active result has a thicker outline).
+`CommandIcons` caches by icon, device-pixel size and foreground color. All controls, including hidden
+tabs, rebind before unreferenced variants are disposed. Currently borrowed images are never evicted.
+Shared theme fonts and remaining icons are disposed only after their controls; per-paint pens/brushes
+are scoped. No fonts or icons are generated per paint and no decorative animation is introduced.
+
+F6 toggles focus between ribbon and document. Tab/Shift+Tab retain native traversal; only the selected
+ribbon header is a Tab stop, with arrows/Home/End selecting other headers. MainForm leaves ordinary
+navigation keys to focused shell/sidebar controls instead of interpreting them as PDF navigation.
+Existing document, zoom, save, search, print and F4 shortcuts remain. Ribbon commands expose meaningful
+names (including distinct page-edit vs view rotation), role/default action, selected/pressed accessible
+states and state-change notifications. Native sidebar tabs/tree/list retain their accessibility support.
+
+Deterministic tests cover 96/120/144/192 DPI sizing, repeated baseline scaling, rotated anchor round trips,
+manual/Fit geometry, selected accessibility states, system high-contrast selection colors, icon lifetime
+and narrow status layout. The ignored harness checks 1920/1366/1024/800 **logical** client widths at the
+host DPI, complete shell painting, keyboard isolation, existing viewer/edit/save/print regressions and
+repeated disposal. Simulated viewer DPI tests change only the .NET test control's internal DPI property
+and invoke our callbacks; they do **not** prove Windows native monitor-message delivery, font scaling
+or mixed-monitor transitions. Actual screenshots were inspected at host 125% DPI.
+
+Remaining validation: physical mixed-monitor moves, 100/150/200% native-window visual review, live
+high-contrast switching, Narrator/UI Automation interoperability, Windows large-text settings and
+localized long labels. The PDF canvas still has no full screen-reader text/structure provider; MSAA
+command-state support is not a claim of complete accessibility compliance. Extremely narrow work areas
+may require collapsing the sidebar. No dark mode, new PDF feature or dependency was added.
 
 ## Printing
 
@@ -160,7 +227,7 @@ The current page is the page containing the viewport's vertical center; a center
 
 ### Zoom and fit
 
-- Manual zoom is 25–500%, in 25-percentage-point steps. 100% means 96 pixels per inch (96/72 pixels per PDF point). Ctrl++/Ctrl+- resume from the last manual percentage; Ctrl+0 resets to 100%.
+- Manual zoom is 25–500%, in 25-percentage-point steps. 100% means the current display DPI in pixels per inch (displayDpi/72 pixels per PDF point; 96 at 100% Windows scaling). Ctrl++/Ctrl+- resume from the last manual percentage; Ctrl+0 resets to 100%.
 - Fit Width sizes each page independently to the usable viewport width minus two 16-pixel margins. Mixed-size pages therefore share a target width but can have different scales/heights.
 - Fit Page chooses the smaller width/height scale for the current reference page, subtracting the margins, then applies that one scale to every page. Other differently sized pages may require scrolling. Scrolling/navigation alone does not recalculate the scale. Pressing Fit Page again or resizing refits using the then-current page.
 - Zoom/resize captures the page and fractional position at the previous viewport center and restores that center in the new layout, clamped to document edges. It never resets unconditionally to page 1.
@@ -288,7 +355,7 @@ Deterministic tests cover exact/ordinal matching, literal newlines, no Unicode n
 
 ### View state and shared surface
 
-`ViewerState.DisplayMode` explicitly stores `ViewerDisplayMode.Continuous` or `SinglePage`; it is never inferred from control visibility. `ViewerState.Rotation` is Core's immutable `VisualRotation` value, normalized to 0/90/180/270 degrees. Its constructor accepts only integer multiples of 90 (including negative/repeated turns), rejecting arbitrary angles; clockwise/counter-clockwise commands wrap in opposite directions. Both properties are **view state only**: they never affect edit history or dirty state and introduce no source-byte mutation or Save behavior. New documents create a fresh default state: Continuous, 0° additional rotation, manual 100%. Existing zoom limits/steps remain 25–500% / 25 points, with 100% = 96 DPI.
+`ViewerState.DisplayMode` explicitly stores `ViewerDisplayMode.Continuous` or `SinglePage`; it is never inferred from control visibility. `ViewerState.Rotation` is Core's immutable `VisualRotation` value, normalized to 0/90/180/270 degrees. Its constructor accepts only integer multiples of 90 (including negative/repeated turns), rejecting arbitrary angles; clockwise/counter-clockwise commands wrap in opposite directions. Both properties are **view state only**: they never affect edit history or dirty state and introduce no source-byte mutation or Save behavior. New documents create a fresh default state: Continuous, 0° additional rotation, manual 100%. Existing zoom limits/steps remain 25–500% / 25 points, with 100% mapped to the current monitor's display DPI (96 at the baseline).
 
 One toolbar dropdown selects the mode; ↶ and ↷ buttons rotate counter-clockwise/clockwise with accessible names and view-only tooltips. There are no new shortcuts. Existing Ctrl++/Ctrl+-/Ctrl+0, page commands, search and F4 remain unchanged. A single `ContinuousPdfView` and `ContinuousPageLayout` serve both modes, reusing painting, input, overlays, worker scheduling and caches. There is no alternate viewer, permanent offscreen control, or duplicate displayed-image collection.
 

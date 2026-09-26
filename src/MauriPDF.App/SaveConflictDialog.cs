@@ -6,6 +6,8 @@ internal sealed class SaveConflictDialog : Form
 {
     public SaveConflictDialog(bool missing)
     {
+        AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96, 96);
         Text = "MauriPDF";
         FormBorderStyle = FormBorderStyle.FixedDialog;
         StartPosition = FormStartPosition.CenterParent;

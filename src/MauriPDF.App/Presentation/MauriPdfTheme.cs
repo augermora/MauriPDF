@@ -3,21 +3,26 @@ namespace MauriPDF.App.Presentation;
 /// <summary>Logical (96 DPI) shell tokens. Fonts belong to the shell, never individual buttons.</summary>
 internal sealed class MauriPdfTheme : IDisposable
 {
-    public static readonly Color Ink = Color.FromArgb(32, 43, 60);
-    public static readonly Color Accent = Color.FromArgb(52, 120, 201);
-    public static readonly Color Background = Color.FromArgb(244, 246, 249);
-    public static readonly Color Panel = Color.White;
-    public static readonly Color Group = Color.FromArgb(247, 249, 252);
-    public static readonly Color GroupCaption = Color.FromArgb(236, 241, 247);
-    public static readonly Color Pressed = Color.FromArgb(210, 226, 246);
-    public static readonly Color Status = Color.FromArgb(237, 242, 248);
-    public static readonly Color Border = Color.FromArgb(216, 224, 234);
-    public static readonly Color Muted = Color.FromArgb(100, 116, 139);
-    public static readonly Color Selected = Color.FromArgb(225, 237, 252);
-    public static readonly Color Hover = Color.FromArgb(237, 243, 251);
-    public static readonly Color Disabled = Color.FromArgb(151, 162, 178);
-    public static readonly Color Workspace = Color.FromArgb(226, 231, 238);
+    public static Color Ink => SystemInformation.HighContrast ? SystemColors.WindowText : Color.FromArgb(32, 43, 60);
+    public static Color Accent => SystemInformation.HighContrast ? SystemColors.WindowText : Color.FromArgb(52, 120, 201);
+    public static Color Background => SystemInformation.HighContrast ? SystemColors.Window : Color.FromArgb(244, 246, 249);
+    public static Color Panel => SystemInformation.HighContrast ? SystemColors.Window : Color.White;
+    public static Color Group => SystemInformation.HighContrast ? SystemColors.Window : Color.FromArgb(247, 249, 252);
+    public static Color GroupCaption => SystemInformation.HighContrast ? SystemColors.Window : Color.FromArgb(236, 241, 247);
+    public static Color Pressed => SystemInformation.HighContrast ? SystemColors.Highlight : Color.FromArgb(210, 226, 246);
+    public static Color Status => SystemInformation.HighContrast ? SystemColors.Window : Color.FromArgb(237, 242, 248);
+    public static Color Border => SystemInformation.HighContrast ? SystemColors.WindowText : Color.FromArgb(216, 224, 234);
+    public static Color Muted => SystemInformation.HighContrast ? SystemColors.WindowText : Color.FromArgb(100, 116, 139);
+    public static Color Selected => SystemInformation.HighContrast ? SystemColors.Highlight : Color.FromArgb(225, 237, 252);
+    public static Color Hover => SystemInformation.HighContrast ? SystemColors.Window : Color.FromArgb(237, 243, 251);
+    public static Color Disabled => SystemInformation.HighContrast ? SystemColors.GrayText : Color.FromArgb(151, 162, 178);
+    public static Color Workspace => SystemInformation.HighContrast ? SystemColors.AppWorkspace : Color.FromArgb(226, 231, 238);
     public const int Space = 8;
+    public static Color SelectedText => SelectionColors(SystemInformation.HighContrast).Foreground;
+    internal static (Color Background, Color Foreground) SelectionColors(bool highContrast) => highContrast
+        ? (SystemColors.Highlight, SystemColors.HighlightText) : (Color.FromArgb(225, 237, 252), Color.FromArgb(32, 43, 60));
+    public static Color ActionText => SystemInformation.HighContrast ? SystemColors.HighlightText : Color.White;
+    public static Color ActionBackground => SystemInformation.HighContrast ? SystemColors.Highlight : Accent;
     public const int SmallIcon = 22;
     public const int LargeIcon = 32;
     public const int CommandHeight = 29;

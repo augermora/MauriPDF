@@ -27,6 +27,8 @@ internal sealed partial class ContinuousPdfView : Control
     private long _generation;
     private bool _disposed;
     private bool _ready;
+    private bool _dpiTransition;
+    private ReadingAnchor? _dpiAnchor;
 
     public ContinuousPdfView(PdfViewerRenderer renderer)
     {
@@ -66,7 +68,7 @@ internal sealed partial class ContinuousPdfView : Control
         {
             if (_layout is null || _state is null || _sizes is null || !_layout.ContainsPage(_state.PageIndex)) return null;
             PdfPageSize size = _layout.RotationForPage(_state.PageIndex).EffectiveSize(_sizes[SourcePageIndex(_state.PageIndex)]);
-            return _layout[_state.PageIndex].Width / (size.WidthPoints * 96.0 / 72) * 100;
+            return _layout[_state.PageIndex].Width / (size.WidthPoints * DeviceDpi / 72.0) * 100;
         }
     }
     private int ViewWidth => Math.Max(1, ClientSize.Width - _vertical.Width);
@@ -150,7 +152,7 @@ internal sealed partial class ContinuousPdfView : Control
     public void ScrollLine(int direction)
     {
         _searchNavigation = null;
-        MoveTo(_top + direction * 48, _left);
+        MoveTo(_top + direction * Presentation.DisplayMetrics.Scale(48, DeviceDpi), _left);
     }
 
     private void RebuildLayout(ReadingAnchor? editedAnchor = null)
@@ -160,7 +162,7 @@ internal sealed partial class ContinuousPdfView : Control
         try
         {
             ContinuousPageLayout? next = _sizes is not null && _state is not null
-                ? new ContinuousPageLayout(_sizes, _state, ViewWidth, ViewHeight, _logicalPages) : null;
+                ? new ContinuousPageLayout(_sizes, _state, ViewWidth, ViewHeight, _logicalPages, DeviceDpi) : null;
             CancelDemand();
             _failed.Clear();
             _layout = next;
@@ -183,10 +185,10 @@ internal sealed partial class ContinuousPdfView : Control
         catch (Exception exception) { RenderFailed?.Invoke(exception); }
     }
 
-    private static double ScrollOffset(ScrollEventArgs e, double current, double maximum, int viewport) => e.Type switch
+    private double ScrollOffset(ScrollEventArgs e, double current, double maximum, int viewport) => e.Type switch
     {
-        ScrollEventType.SmallIncrement => current + 48,
-        ScrollEventType.SmallDecrement => current - 48,
+        ScrollEventType.SmallIncrement => current + Presentation.DisplayMetrics.Scale(48, DeviceDpi),
+        ScrollEventType.SmallDecrement => current - Presentation.DisplayMetrics.Scale(48, DeviceDpi),
         ScrollEventType.LargeIncrement => current + viewport * 0.9,
         ScrollEventType.LargeDecrement => current - viewport * 0.9,
         ScrollEventType.EndScroll => current,
@@ -315,16 +317,41 @@ internal sealed partial class ContinuousPdfView : Control
         _searchNavigation = null;
         base.OnMouseWheel(e);
         int lines = SystemInformation.MouseWheelScrollLines;
-        double distance = lines < 0 ? ViewHeight * 0.9 : lines * 16;
+        double distance = lines < 0 ? ViewHeight * 0.9 : lines * Presentation.DisplayMetrics.Scale(16, DeviceDpi);
         MoveTo(_top - e.Delta / 120.0 * distance, _left);
     }
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
-        if (!_ready || _disposed) return;
+        if (!_ready || _disposed || _dpiTransition) return;
         MoveTo(_top, _left);
         _resizeTimer.Stop();
         _resizeTimer.Start();
+    }
+
+    protected override void OnDpiChangedBeforeParent(EventArgs e)
+    {
+        _dpiTransition = true;
+        _draggingText = false;
+        Capture = false;
+        _dpiAnchor = _layout?.CaptureAnchor(_top, _layoutViewportHeight, _left, _layoutViewportWidth);
+        _resizeTimer.Stop();
+        CancelDemand();
+        base.OnDpiChangedBeforeParent(e);
+    }
+
+    protected override void OnDpiChangedAfterParent(EventArgs e)
+    {
+        base.OnDpiChangedAfterParent(e);
+        // Defer until the complete parent/child layout has settled, without reopening the source.
+        BeginInvoke(() =>
+        {
+            if (_disposed) return;
+            _dpiTransition = false;
+            _resizeTimer.Stop();
+            RebuildLayout(_dpiAnchor);
+            _dpiAnchor = null;
+        });
     }
 
     private void CancelDemand()

@@ -19,15 +19,23 @@ internal sealed class DocumentSearchBar : ToolStrip
     private long _workerGeneration;
     private bool _disposed;
     private bool _activateFirstResult = true;
+    private bool _arranging;
 
     public DocumentSearchBar(PdfViewerRenderer renderer, ContinuousPdfView view)
     {
         _renderer = renderer;
         _view = view;
         GripStyle = ToolStripGripStyle.Hidden;
+        TabStop = true;
+        AccessibleName = "Document text search";
         Visible = false;
         ToolStripButton close = new("Close") { ToolTipText = "Close search (Esc)" };
         Items.AddRange([new ToolStripLabel("Find:"), _query, _previous, _next, _status, close]);
+        foreach (ToolStripItem item in Items) item.Overflow = ToolStripItemOverflow.Never;
+        _previous.AccessibleName = "Previous search result"; _previous.ToolTipText = "Previous result (Shift+Enter or Shift+F3)";
+        _next.AccessibleName = "Next search result"; _next.ToolTipText = "Next result (Enter or F3)";
+        close.AccessibleName = "Close search";
+        _status.AutoSize = false;
         _query.TextChanged += (_, _) => QueryChanged();
         _query.KeyDown += (_, e) =>
         {
@@ -42,6 +50,28 @@ internal sealed class DocumentSearchBar : ToolStrip
     }
 
     public bool QueryFocused => _query.Focused;
+
+    protected override void OnLayout(LayoutEventArgs e)
+    {
+        if (!_arranging && Items.Count == 6)
+        {
+            _arranging = true;
+            try
+            {
+                int scale(int value) => Presentation.DisplayMetrics.Scale(value, DeviceDpi);
+                Padding = new Padding(scale(8), scale(4), scale(8), scale(4));
+                int fixedWidth = Items.Cast<ToolStripItem>().Where(item => item != _query && item != _status)
+                    .Sum(item => item.GetPreferredSize(Size.Empty).Width + item.Margin.Horizontal);
+                int available = Math.Max(scale(100), ClientSize.Width - Padding.Horizontal - fixedWidth - scale(16));
+                _query.Width = Math.Clamp(available / 2, scale(100), scale(220));
+                _status.Width = Math.Max(0, available - _query.Width);
+                _status.ToolTipText = _status.Text;
+            }
+            finally { _arranging = false; }
+        }
+        base.OnLayout(e);
+    }
+    protected override void OnDpiChangedAfterParent(EventArgs e) { base.OnDpiChangedAfterParent(e); PerformLayout(); }
 
     public void OpenSearch()
     {

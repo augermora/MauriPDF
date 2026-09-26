@@ -17,6 +17,20 @@ framed captioned groups and clearly selected tabs/toggles. The navigation pane s
 a centered Open PDF card welcomes new documents. Dedicated status fields retain page navigation,
 effective zoom percentage and display mode while long messages truncate with a tooltip.
 
+The shell uses PerMonitorV2 and logical 96-DPI sizing. Manual 100% zoom maps PDF inches to the
+current monitor's display DPI; Fit modes use the available viewport. Monitor changes preserve the
+reading anchor and refresh visible rasters without reopening the PDF. F6 moves between ribbon and
+document; Tab/Shift+Tab traverse controls, and ribbon tabs support arrows/Home/End. Selected controls
+expose accessibility states and visible focus. Windows high-contrast colors replace the normal palette
+when enabled. No decorative animations are used.
+
+The minimum window is 800 × 560 logical pixels, capped to the monitor's working area. Narrow ribbons
+scroll horizontally and reveal keyboard-focused groups. A compact two-row status layout is available
+when space is particularly limited. Thumbnail rows cap at 256 device pixels to respect their empty
+ImageList sizing constraint; thumbnail cache resolution/budgets remain unchanged. Geometry tests cover
+100/125/150/200% DPI and the smoke harness simulates viewer DPI transitions, but physical mixed-monitor,
+live high-contrast and screen-reader validation remain outstanding.
+
 **Print** (File/Home or Ctrl+P) opens the standard Windows print dialog for all pages, the current
 page or a contiguous range. Output respects unsaved page order, deletions and structural rotations,
 but excludes view-only rotation and selection/search overlays. Printing never saves or changes the

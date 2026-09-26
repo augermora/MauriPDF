@@ -12,16 +12,17 @@ internal enum CommandIcon
 /// <summary>Original MauriPDF line icons on a 24-unit vector grid. No external assets or fonts.</summary>
 internal sealed class CommandIcons : IDisposable
 {
-    private readonly Dictionary<(CommandIcon Icon, int Size), Bitmap> _cache = [];
+    private readonly Dictionary<(CommandIcon Icon, int Size, int Color), Bitmap> _cache = [];
 
-    public Bitmap Get(CommandIcon icon, int size)
+    public Bitmap Get(CommandIcon icon, int size, Color? foreground = null)
     {
-        if (_cache.TryGetValue((icon, size), out Bitmap? image)) return image;
+        Color color = foreground ?? MauriPdfTheme.Ink;
+        if (_cache.TryGetValue((icon, size, color.ToArgb()), out Bitmap? image)) return image;
         image = new Bitmap(size, size);
         using Graphics g = Graphics.FromImage(image);
         g.SmoothingMode = SmoothingMode.AntiAlias;
         g.ScaleTransform(size / 24F, size / 24F);
-        using Pen pen = new(MauriPdfTheme.Ink, 2F) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
+        using Pen pen = new(color, 2F) { StartCap = LineCap.Round, EndCap = LineCap.Round, LineJoin = LineJoin.Round };
         void Line(float x, float y, float x2, float y2) => g.DrawLine(pen, x, y, x2, y2);
         void Rect(float x, float y, float w, float h) => g.DrawRectangle(pen, x, y, w, h);
         void Arrow(bool right)
@@ -75,7 +76,7 @@ internal sealed class CommandIcons : IDisposable
                 Line(12, 6, 21, 6); Line(12, 12, 19, 12); Line(12, 18, 21, 18); break;
             case CommandIcon.Sidebar: Rect(3, 4, 18, 16); Line(9, 4, 9, 20); break;
         }
-        _cache.Add((icon, size), image);
+        _cache.Add((icon, size, color.ToArgb()), image);
         return image;
     }
 
@@ -83,5 +84,12 @@ internal sealed class CommandIcons : IDisposable
     {
         foreach (Bitmap image in _cache.Values) image.Dispose();
         _cache.Clear();
+    }
+
+    // Called only after every borrower has rebound its image following a presentation transition.
+    public void Retain(ISet<Image> borrowed)
+    {
+        foreach (var key in _cache.Keys.ToArray())
+            if (!borrowed.Contains(_cache[key])) { _cache[key].Dispose(); _cache.Remove(key); }
     }
 }

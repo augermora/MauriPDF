@@ -187,6 +187,7 @@ internal sealed class PrintProgressWindow : Form
         FormBorderStyle = FormBorderStyle.FixedDialog;
         ControlBox = false; ShowInTaskbar = false;
         AutoScaleMode = AutoScaleMode.Dpi;
+        AutoScaleDimensions = new SizeF(96, 96);
         ClientSize = new Size(360, 110);
         Button cancel = new() { Text = "Cancel printing", Dock = DockStyle.Bottom, Height = 34 };
         cancel.Click += (_, _) => { cancellation.Cancel(); cancel.Enabled = false; _status.Text = "Cancelling after the current page…"; };

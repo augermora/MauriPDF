@@ -82,7 +82,7 @@ public sealed class ShellPresentationTests
             Assert.Equal(42, icons.Get(icon, 42).Height);
     });
 
-    private static void InSta(Action action)
+    internal static void InSta(Action action)
     {
         Exception? failure = null;
         Thread thread = new(() => { try { action(); } catch (Exception exception) { failure = exception; } });

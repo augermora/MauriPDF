@@ -89,7 +89,7 @@ internal sealed partial class MainForm : Form
         _toggleThumbnails.Click += (_, _) => ToggleThumbnails();
         Text = "MauriPDF";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(850, 600);
+        MinimumSize = new Size(800, 560);
 
         _open.Click += (_, _) => ChooseDocument();
         _save.Click += async (_, _) => await SaveAsync();
@@ -135,6 +135,7 @@ internal sealed partial class MainForm : Form
 
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        if (keyData == Keys.F6) { if (_ribbon?.ContainsFocus == true) _viewport.Focus(); else _ribbon?.FocusSelectedTab(); return true; }
         if (keyData == (Keys.Control | Keys.P)) { _ = PrintAsync(); return true; }
         if (keyData == (Keys.Control | Keys.F)) { _searchBar.OpenSearch(); return true; }
         if (keyData is Keys.F3 or (Keys.Shift | Keys.F3)) { _searchBar.Navigate(keyData.HasFlag(Keys.Shift)); return true; }
@@ -180,8 +181,9 @@ internal sealed partial class MainForm : Form
             return base.ProcessCmdKey(ref msg, keyData);
         }
 
-        // TreeView owns its ordinary navigation/expand/collapse/activation keys.
-        if (_outline.ContainsFocus && (keyData & Keys.Control) == 0)
+        // Shell/navigation controls own ordinary arrows/Home/End; do not turn them into PDF commands.
+        if ((_ribbon?.ContainsFocus == true || _navigationTabs.ContainsFocus || _searchBar.ContainsFocus || _statusBar?.ContainsFocus == true)
+            && (keyData & Keys.Control) == 0)
             return base.ProcessCmdKey(ref msg, keyData);
 
         if (!_thumbnails.ContainsFocus && keyData is Keys.PageUp or Keys.PageDown or Keys.Up or Keys.Down)
@@ -463,10 +465,12 @@ internal sealed partial class MainForm : Form
     private void ToggleThumbnails()
     {
         if (_closing) return;
+        bool moveFocus = !_split.Panel1Collapsed && _navigationTabs.ContainsFocus;
         _split.Panel1Collapsed = !_split.Panel1Collapsed;
         _toggleThumbnails.Checked = !_split.Panel1Collapsed;
         UpdateSidebarActivity();
         UpdateShellCommands();
+        if (moveFocus) _viewport.Focus();
     }
 
     private void UpdateSidebarActivity() => _thumbnails.SetActive(!_split.Panel1Collapsed && _navigationTabs.SelectedIndex == 0);

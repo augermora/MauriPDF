@@ -133,6 +133,12 @@ internal sealed partial class ContinuousPdfView
                 TextBounds mapped = TextCoordinateTransform.ToDisplay(box, display.Left, display.Top, display.Width, display.Height, _layout!.RotationForPage(page));
                 graphics.FillRectangle(brush, (float)mapped.Left, (float)mapped.Top,
                     (float)(mapped.Right - mapped.Left), (float)(mapped.Bottom - mapped.Top));
+                if (SystemInformation.HighContrast)
+                {
+                    using Pen outline = new(SystemColors.Highlight, result == _search.ActiveIndex ? 3 : 1);
+                    graphics.DrawRectangle(outline, (float)mapped.Left, (float)mapped.Top,
+                        (float)(mapped.Right - mapped.Left), (float)(mapped.Bottom - mapped.Top));
+                }
             }
         }
     }
