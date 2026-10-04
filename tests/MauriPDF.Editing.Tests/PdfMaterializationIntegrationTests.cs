@@ -180,9 +180,9 @@ public sealed class PdfMaterializationIntegrationTests
         return value.ToString();
     }
 
-    private static byte[] CreateSourcePdf()
+    internal static byte[] CreateSourcePdf(string prefix = "PAGE")
     {
-        string[] labels = ["PAGE A", "PAGE B", "PAGE C"];
+        string[] labels = [$"{prefix} A", $"{prefix} B", $"{prefix} C"];
         (int Width, int Height, int Rotation)[] geometry = [(200, 100, 90), (160, 160, 0), (240, 140, 270)];
         List<string> objects =
         [

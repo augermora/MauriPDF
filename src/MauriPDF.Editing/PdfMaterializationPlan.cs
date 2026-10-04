@@ -1,24 +1,31 @@
 namespace MauriPDF.Editing;
 
-public readonly record struct PdfPageMaterialization(int SourcePageIndex, int StructuralRotationDegrees);
+public readonly record struct PdfPageMaterialization(int SourcePageIndex, int StructuralRotationDegrees, Guid SourceDocumentId = default);
 
 /// <summary>Immutable, UI-free snapshot of the physical pages a writer must create.</summary>
 public sealed class PdfMaterializationPlan
 {
-    private PdfMaterializationPlan(PdfPageMaterialization[] pages, long revision)
+    private PdfMaterializationPlan(PdfPageMaterialization[] pages, long revision, IEnumerable<Core.Documents.PdfSourceDocument>? sources)
     {
         Pages = Array.AsReadOnly(pages);
         Revision = revision;
+        Sources = new System.Collections.ObjectModel.ReadOnlyDictionary<Guid, Core.Documents.PdfSourceDocument>(
+            sources?.ToDictionary(source => source.Id) ?? []);
+        if (Sources.Count == 0 && pages.Select(page => page.SourceDocumentId).Distinct().Skip(1).Any())
+            throw new ArgumentException("A multi-source plan requires source descriptors.", nameof(sources));
     }
 
     public IReadOnlyList<PdfPageMaterialization> Pages { get; }
     public long Revision { get; }
+    public IReadOnlyDictionary<Guid, Core.Documents.PdfSourceDocument> Sources { get; }
+    public string SourcePath(Guid id, string legacySourcePath) => Sources.Count == 0 ? legacySourcePath
+        : Sources.TryGetValue(id, out var source) ? source.Path : throw new InvalidDataException("The snapshot refers to an unknown source.");
 
-    public static PdfMaterializationPlan From(EditedDocumentState state)
+    public static PdfMaterializationPlan From(EditedDocumentState state, IEnumerable<Core.Documents.PdfSourceDocument>? sources = null)
     {
         ArgumentNullException.ThrowIfNull(state);
         return new(state.Pages.Select(page => new PdfPageMaterialization(
-            page.SourcePageIndex, page.StructuralRotation.Degrees)).ToArray(), state.Revision);
+            page.SourcePageIndex, page.StructuralRotation.Degrees, page.SourceDocumentId)).ToArray(), state.Revision, sources);
     }
 }
 

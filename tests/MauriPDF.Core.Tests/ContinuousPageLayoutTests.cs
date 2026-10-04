@@ -7,6 +7,24 @@ namespace MauriPDF.Core.Tests;
 public sealed class ContinuousPageLayoutTests
 {
     [Fact]
+    public void ComposedLayoutResolvesSameNumericIndexAgainstEachSourceInBothModes()
+    {
+        var a = new Documents.PdfSourceDocument(Guid.NewGuid(), "a.pdf", [new(72, 144)]);
+        var b = new Documents.PdfSourceDocument(Guid.NewGuid(), "b.pdf", [new(216, 72)]);
+        Documents.LogicalPageReference[] pages = [new(new(a.Id, 0), default), new(new(b.Id, 0, Guid.NewGuid()), new(90))];
+        Dictionary<Guid, Documents.PdfSourceDocument> registry = new() { [a.Id] = a, [b.Id] = b };
+        ContinuousPageLayout continuous = new(a.Pages, new(2), 800, 600, pages, sources: registry);
+        Assert.Equal(96, continuous[0].Width);
+        Assert.Equal(192, continuous[0].Height);
+        Assert.Equal(96, continuous[1].Width);
+        Assert.Equal(288, continuous[1].Height);
+        ContinuousPageLayout single = new(a.Pages, new ViewerState(2).GoToPage(2).SetDisplayMode(ViewerDisplayMode.SinglePage), 800, 600, pages, sources: registry);
+        Assert.Single(Enumerable.Range(0, single.Count));
+        Assert.Equal(continuous[1].Width, single[1].Width);
+        Assert.Equal(b.Pages[0], single.SizeForPage(1));
+    }
+
+    [Fact]
     public void MixedPagesHaveIndependentGeometryAndConstantGaps()
     {
         ContinuousPageLayout layout = new([new(72, 144), new(144, 72)], new(2), 800, 600);

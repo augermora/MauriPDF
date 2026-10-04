@@ -8,13 +8,13 @@ internal sealed partial class MainForm
     private readonly IPdfPrintWorkflow _printer;
     private readonly ToolStripButton _print = new("Print") { ToolTipText = "Print document (Ctrl+P)" };
     private bool _printing;
-    private bool DocumentBusy => _saving || _printing;
+    private bool DocumentBusy => _saving || _printing || _importing;
 
     private async Task PrintAsync()
     {
         if (DocumentBusy || _closing || _resourcesDisposed || _edits is null || _sourcePath is null || _state is null) return;
         PdfPrintRequest request = new(_sourcePath, Path.GetFileName(_savedDocumentPath ?? _sourcePath),
-            PdfMaterializationPlan.From(_edits.State), _state.PageIndex);
+            _edits.CreateMaterializationPlan(), _state.PageIndex);
         _printing = true;
         _loading.Text = "Printing…";
         UpdateToolbar();

@@ -26,6 +26,7 @@ public sealed class PdfiumDocumentMaterializer : IPdfDocumentMaterializer
         string destination = Path.GetFullPath(destinationPath);
         if (!File.Exists(source)) throw new FileNotFoundException("The source PDF was not found.", source);
         FilePathIdentity.RejectSourceAlias(source, destination);
+        foreach (var registered in plan.Sources.Values) FilePathIdentity.RejectSourceAlias(registered.Path, destination);
         string directory = Path.GetDirectoryName(destination) ?? throw new IOException("The destination directory is invalid.");
         if (!Directory.Exists(directory)) throw new DirectoryNotFoundException("The destination directory does not exist.");
 
@@ -44,11 +45,12 @@ public sealed class PdfiumDocumentMaterializer : IPdfDocumentMaterializer
         {
             using IDisposable library = PdfiumRuntime.Acquire();
             using IDisposable nativeCall = PdfiumRuntime.Enter();
-            WriteTemporary(sourcePath, temporaryPath, plan, cancellationToken);
-            (int pageCount, long fileLength) = ValidateTemporary(temporaryPath, plan.Pages.Count);
+            var expected = WriteTemporary(sourcePath, temporaryPath, plan, cancellationToken);
+            (int pageCount, long fileLength) = ValidateTemporary(temporaryPath, expected);
             cancellationToken.ThrowIfCancellationRequested();
             VerifyDestination(request, destinationPath);
             FilePathIdentity.RejectSourceAlias(sourcePath, destinationPath);
+            foreach (var registered in plan.Sources.Values) FilePathIdentity.RejectSourceAlias(registered.Path, destinationPath);
             if (File.Exists(destinationPath))
             {
                 backupPath = CreateTemporaryPath(directory, $"{Path.GetFileName(destinationPath)}.backup");
@@ -114,24 +116,37 @@ public sealed class PdfiumDocumentMaterializer : IPdfDocumentMaterializer
         throw new IOException("Could not allocate a temporary output file.");
     }
 
-    private static void WriteTemporary(string sourcePath, string temporaryPath, PdfMaterializationPlan plan,
+    private static ExpectedPage[] WriteTemporary(string sourcePath, string temporaryPath, PdfMaterializationPlan plan,
         CancellationToken cancellationToken)
     {
-        FpdfDocumentT? source = null;
+        Dictionary<Guid, FpdfDocumentT> sources = [];
+        ExpectedPage[] expected = new ExpectedPage[plan.Pages.Count];
         FpdfDocumentT? destination = null;
         try
         {
-            source = fpdfview.FPDF_LoadDocument(sourcePath, null!);
-            if (source is null) throw LoadFailure("source", fpdfview.FPDF_GetLastError());
-            int sourceCount = fpdfview.FPDF_GetPageCount(source);
-            int[] indices = plan.Pages.Select(page => page.SourcePageIndex).ToArray();
-            if (indices.Any(index => index < 0 || index >= sourceCount))
-                throw new InvalidDataException("The edit snapshot contains an invalid source page.");
-
             destination = fpdf_edit.FPDF_CreateNewDocument();
             if (destination is null) throw new InvalidOperationException("PDFium could not create the output document.");
-            if (fpdf_ppo.FPDF_ImportPagesByIndex(destination, source, ref indices[0], (ulong)indices.Length, 0) == 0)
-                throw new InvalidDataException("PDFium could not import the edited page sequence.");
+            for (int first = 0; first < plan.Pages.Count;)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                Guid sourceId = plan.Pages[first].SourceDocumentId;
+                if (!sources.TryGetValue(sourceId, out FpdfDocumentT? source))
+                {
+                    source = fpdfview.FPDF_LoadDocument(plan.SourcePath(sourceId, sourcePath), null!);
+                    if (source is null) throw LoadFailure("source", fpdfview.FPDF_GetLastError());
+                    sources.Add(sourceId, source);
+                }
+                int last = first + 1;
+                while (last < plan.Pages.Count && plan.Pages[last].SourceDocumentId == sourceId) last++;
+                int[] indices = new int[last - first];
+                for (int offset = 0; offset < indices.Length; offset++) indices[offset] = plan.Pages[first + offset].SourcePageIndex;
+                int sourceCount = fpdfview.FPDF_GetPageCount(source);
+                if (indices.Any(index => index < 0 || index >= sourceCount)) throw new InvalidDataException("Invalid source page in snapshot.");
+                // PDFium's final argument is the zero-based insertion position in the destination.
+                if (fpdf_ppo.FPDF_ImportPagesByIndex(destination, source, ref indices[0], (ulong)indices.Length, first) == 0)
+                    throw new InvalidDataException("PDFium could not import the composed page sequence.");
+                first = last;
+            }
 
             for (int index = 0; index < plan.Pages.Count; index++)
             {
@@ -144,6 +159,10 @@ public sealed class PdfiumDocumentMaterializer : IPdfDocumentMaterializer
                     if (intrinsic is < 0 or > 3) throw new InvalidDataException("PDFium returned an invalid page rotation.");
                     int structural = plan.Pages[index].StructuralRotationDegrees / 90;
                     fpdf_edit.FPDFPageSetRotation(page, (intrinsic + structural) % 4);
+                    double width = 0, height = 0;
+                    if (fpdfview.FPDF_GetPageSizeByIndex(destination, index, ref width, ref height) == 0)
+                        throw new InvalidDataException("Cannot read imported page dimensions.");
+                    expected[index] = new(width, height, (intrinsic + structural) % 4);
                     RemoveLinkAnnotations(page);
                 }
                 finally { fpdfview.FPDF_ClosePage(page); }
@@ -170,11 +189,12 @@ public sealed class PdfiumDocumentMaterializer : IPdfDocumentMaterializer
             if (fpdf_save.FPDF_SaveAsCopy(destination, writer, NoIncrementalSave) == 0)
                 throw new IOException("PDFium could not serialize the edited PDF.", callbackError);
             stream.Flush(flushToDisk: true);
+            return expected;
         }
         finally
         {
             if (destination is not null) fpdfview.FPDF_CloseDocument(destination);
-            if (source is not null) fpdfview.FPDF_CloseDocument(source);
+            foreach (FpdfDocumentT source in sources.Values) fpdfview.FPDF_CloseDocument(source);
         }
     }
 
@@ -193,7 +213,9 @@ public sealed class PdfiumDocumentMaterializer : IPdfDocumentMaterializer
         }
     }
 
-    private static (int PageCount, long FileLength) ValidateTemporary(string path, int expectedPageCount)
+    private readonly record struct ExpectedPage(double Width, double Height, int Rotation);
+
+    private static (int PageCount, long FileLength) ValidateTemporary(string path, ExpectedPage[] expected)
     {
         FileInfo file = new(path);
         if (!file.Exists || file.Length < 8) throw new InvalidDataException("The generated PDF is empty or incomplete.");
@@ -202,37 +224,32 @@ public sealed class PdfiumDocumentMaterializer : IPdfDocumentMaterializer
         try
         {
             int count = fpdfview.FPDF_GetPageCount(document);
-            if (count != expectedPageCount) throw new InvalidDataException("The generated PDF has an unexpected page count.");
+            if (count != expected.Length) throw new InvalidDataException("The generated PDF has an unexpected page count.");
             for (int index = 0; index < count; index++)
             {
                 double width = 0, height = 0;
                 if (fpdfview.FPDF_GetPageSizeByIndex(document, index, ref width, ref height) == 0
                     || !double.IsFinite(width) || !double.IsFinite(height) || width <= 0 || height <= 0)
                     throw new InvalidDataException($"The generated PDF has invalid dimensions on page {index + 1}.");
+                if (Math.Abs(width - expected[index].Width) > .01 || Math.Abs(height - expected[index].Height) > .01)
+                    throw new InvalidDataException("The generated PDF changed page dimensions.");
+                FpdfPageT? page = fpdfview.FPDF_LoadPage(document, index);
+                if (page is null) throw new InvalidDataException("A generated page could not be loaded.");
+                try
+                {
+                    if (fpdf_edit.FPDFPageGetRotation(page) != expected[index].Rotation)
+                        throw new InvalidDataException("The generated PDF changed page rotation.");
+                    FpdfTextpageT? text = fpdf_text.FPDFTextLoadPage(page);
+                    if (text is null) throw new InvalidDataException("A generated text layer could not be loaded.");
+                    fpdf_text.FPDFTextClosePage(text);
+                }
+                finally { fpdfview.FPDF_ClosePage(page); }
             }
-            ValidateFirstPageRender(document);
             return (count, file.Length);
         }
         finally { fpdfview.FPDF_CloseDocument(document); }
     }
 
-    private static unsafe void ValidateFirstPageRender(FpdfDocumentT document)
-    {
-        FpdfPageT? page = fpdfview.FPDF_LoadPage(document, 0);
-        if (page is null) throw new InvalidDataException("The generated PDF's first page cannot be loaded.");
-        try
-        {
-            byte[] pixels = new byte[8 * 8 * 4];
-            fixed (byte* pointer = pixels)
-            {
-                FpdfBitmapT? bitmap = fpdfview.FPDFBitmapCreateEx(8, 8, (int)FPDFBitmapFormat.BGRA, new IntPtr(pointer), 32);
-                if (bitmap is null) throw new InvalidDataException("The generated PDF could not be validated by rendering.");
-                try { fpdfview.FPDF_RenderPageBitmap(bitmap, page, 0, 0, 8, 8, 0, 0); }
-                finally { fpdfview.FPDFBitmapDestroy(bitmap); }
-            }
-        }
-        finally { fpdfview.FPDF_ClosePage(page); }
-    }
 
     private static InvalidDataException LoadFailure(string subject, ulong error) =>
         new($"PDFium could not open the {subject} (error {error}).");

@@ -22,8 +22,11 @@ public sealed class PdfiumRenderer : IPdfRenderer
         IDisposable sessionLease = PdfiumRuntime.Acquire();
         using IDisposable nativeCall = PdfiumRuntime.Enter();
         FpdfDocumentT? document = null;
+        FileStream? sourceLock = null;
         try
         {
+            // Keep the backing bytes stable/readable for rendering, Undo, Save and Print until close.
+            sourceLock = new FileStream(fullPath, FileMode.Open, FileAccess.Read, FileShare.Read);
             document = fpdfview.FPDF_LoadDocument(fullPath, null!);
             if (document is null)
             {
@@ -36,8 +39,9 @@ public sealed class PdfiumRenderer : IPdfRenderer
                 throw new InvalidDataException("The PDF does not contain any readable pages.");
             }
 
-            PdfiumRenderSession session = new(document, pageCount, sessionLease);
+            PdfiumRenderSession session = new(document, pageCount, sessionLease, sourceLock);
             document = null;
+            sourceLock = null;
             return session;
         }
         catch
@@ -48,6 +52,7 @@ public sealed class PdfiumRenderer : IPdfRenderer
             }
 
             sessionLease.Dispose();
+            sourceLock?.Dispose();
             throw;
         }
     }

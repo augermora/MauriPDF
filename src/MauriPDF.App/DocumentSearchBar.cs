@@ -143,7 +143,7 @@ internal sealed class DocumentSearchBar : ToolStrip
                 PageSearchResult result;
                 try
                 {
-                    result = await _renderer.SearchPageAsync(generation, _view.SourcePageIndex(page), state.Query, DocumentSearchState.MaximumResults - state.Count);
+                    result = await _renderer.SearchPageAsync(generation, _view.SourcePageIndex(page), state.Query, DocumentSearchState.MaximumResults - state.Count, _view.SourceDocumentId(page));
                     // Worker results are source-indexed; the search index and ordering are logical.
                     result = new(result.Matches.Select(match => match with { PageIndex = page }).ToArray(), result.Truncated);
                 }

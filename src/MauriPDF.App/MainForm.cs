@@ -237,7 +237,7 @@ internal sealed partial class MainForm : Form
         base.OnFormClosing(e);
         if (_shutdownComplete || e.Cancel) return;
         e.Cancel = true;
-        if (DocumentBusy) { _loading.Text = _printing ? "Printing…" : "Saving..."; return; }
+        if (DocumentBusy) { _loading.Text = _importing ? "Importing pages…" : _printing ? "Printing…" : "Saving..."; return; }
         if (_closing) return;
         if (!ConfirmDiscardChanges()) return;
         _closing = true;
@@ -290,21 +290,24 @@ internal sealed partial class MainForm : Form
         _loading.Text = "Opening...";
         try
         {
-            var pages = await _renderer.OpenDocumentAsync(path);
+            Guid sourceId = Guid.NewGuid();
+            var pages = await _renderer.OpenDocumentAsync(path, sourceId);
             if (_resourcesDisposed || requestId != _requestId)
             {
                 return;
             }
 
-            _sourcePath = Path.GetFullPath(path);
+            string sourcePath = Path.GetFullPath(path);
+            DocumentEditSession edits = new(new Core.Documents.PdfSourceDocument(sourceId, sourcePath, pages));
+            _sourcePath = sourcePath;
             _savedDocumentPath = null;
             _savedDocumentIdentity = null;
             _documentName = Path.GetFileName(path);
             _loading.Text = string.Empty;
             _state = new ViewerState(pages.Count);
-            _edits = new DocumentEditSession(pages.Count);
+            _edits = edits;
             _searchBar.SetDocument(pages.Count);
-            _viewport.SetDocument(pages, _edits.State.Pages);
+            _viewport.SetDocument(pages, _edits.State.Pages, _edits.Sources.Sources);
             _thumbnails.SetDocument(pages.Count, _edits.State.Pages);
             UpdateToolbar();
             await LoadOutlineAsync(requestId);
@@ -453,9 +456,10 @@ internal sealed partial class MainForm : Form
     private void RefreshEditedDocument(EditedDocumentState before)
     {
         EditedDocumentState edited = _edits!.State;
-        int current = edited.ResolveCurrentPage(before, _state!.PageIndex);
+        int current = _edits.SuggestedCurrentPageId is { } suggested && edited.LogicalIndex(suggested) is int target
+            ? target : edited.ResolveCurrentPage(before, _state!.PageIndex);
         bool sequenceChanged = !edited.HasSameSequence(before);
-        _state = _state.RemapPages(edited.Pages.Count, current);
+        _state = _state!.RemapPages(edited.Pages.Count, current);
         if (sequenceChanged) _searchBar.PageSequenceChanged(edited.Pages.Count);
         _thumbnails.ApplyEditedPages(edited.Pages);
         _viewport.ApplyEditedPages(edited.Pages, _state, sequenceChanged);
@@ -577,7 +581,8 @@ internal sealed partial class MainForm : Form
     private async Task PersistCoreAsync(string destination, PdfDestinationPolicy policy, SavedFileIdentity? expected)
     {
         DocumentEditSession edits = _edits!;
-        PdfMaterializationPlan snapshot = PdfMaterializationPlan.From(edits.State);
+        edits.Sources.ProtectDestination(destination);
+        PdfMaterializationPlan snapshot = edits.CreateMaterializationPlan();
         PdfMaterializationRequest request = new(_sourcePath!, destination, snapshot, policy, expected);
         PdfMaterializationResult result = await _materializer.MaterializeAsync(request);
         if (_resourcesDisposed || _closing || !ReferenceEquals(edits, _edits)) return;

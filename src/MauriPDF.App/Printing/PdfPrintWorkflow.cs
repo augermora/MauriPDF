@@ -67,7 +67,7 @@ internal sealed class PdfPrintDocument : PrintDocument
     private readonly CancellationToken _cancellation;
     private readonly int _first, _last;
     private IPdfRenderer? _renderer;
-    private IPdfRenderSession? _session;
+    private readonly Dictionary<Guid, IPdfRenderSession> _sessions = [];
     private int _page;
 
     public PdfPrintDocument(PdfPrintRequest request, PrinterSettings settings, int first, int last,
@@ -88,7 +88,6 @@ internal sealed class PdfPrintDocument : PrintDocument
         if (_cancellation.IsCancellationRequested) { e.Cancel = true; return; }
         _page = _first;
         _renderer = _createRenderer();
-        _session = _renderer.Open(_request.SourcePath);
     }
 
     protected override void OnPrintPage(PrintPageEventArgs e)
@@ -98,10 +97,21 @@ internal sealed class PdfPrintDocument : PrintDocument
         RectangleF area = PrintPageLayout.PrintableBounds(e.MarginBounds, e.PageSettings.PrintableArea,
             e.PageSettings.HardMarginX, e.PageSettings.HardMarginY);
         _progress.Report(_page + 1);
-        PrintPagePainter.Draw(_session!, _request.Pages.Pages[_page], graphics, area);
+        DrawPage(_page, graphics, area);
         e.HasMorePages = ++_page <= _last && !_cancellation.IsCancellationRequested;
         if (_cancellation.IsCancellationRequested) e.Cancel = true;
         base.OnPrintPage(e);
+    }
+
+    internal void DrawPage(int logicalIndex, Graphics graphics, RectangleF area)
+    {
+        PdfPageMaterialization page = _request.Pages.Pages[logicalIndex];
+        if (!_sessions.TryGetValue(page.SourceDocumentId, out IPdfRenderSession? session))
+        {
+            session = _renderer!.Open(_request.Pages.SourcePath(page.SourceDocumentId, _request.SourcePath));
+            _sessions.Add(page.SourceDocumentId, session);
+        }
+        PrintPagePainter.Draw(session, page, graphics, area);
     }
 
     protected override void OnEndPrint(PrintEventArgs e)
@@ -112,8 +122,8 @@ internal sealed class PdfPrintDocument : PrintDocument
 
     private void ReleaseSource()
     {
-        try { _session?.Dispose(); }
-        finally { _session = null; _renderer?.Dispose(); _renderer = null; }
+        try { foreach (IPdfRenderSession session in _sessions.Values) session.Dispose(); }
+        finally { _sessions.Clear(); _renderer?.Dispose(); _renderer = null; }
     }
 
     protected override void Dispose(bool disposing)

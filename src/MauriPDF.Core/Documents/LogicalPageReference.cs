@@ -3,7 +3,13 @@ using MauriPDF.Core.Viewing;
 namespace MauriPDF.Core.Documents;
 
 /// <summary>Stable within an opened source document; never a position in the edited sequence.</summary>
-public readonly record struct DocumentPageId(Guid SourceDocumentId, int SourcePageIndex);
+public readonly record struct SourcePageIdentity(Guid SourceDocumentId, int SourcePageIndex);
+
+/// <summary>Logical instance identity. Empty InstanceId denotes the original instance; imports get fresh IDs.</summary>
+public readonly record struct DocumentPageId(Guid SourceDocumentId, int SourcePageIndex, Guid InstanceId = default)
+{
+    public SourcePageIdentity Source => new(SourceDocumentId, SourcePageIndex);
+}
 
 /// <summary>In-memory structural edit delta, distinct from temporary viewer rotation.</summary>
 public readonly record struct StructuralPageRotation
@@ -25,5 +31,7 @@ public readonly record struct StructuralPageRotation
 public readonly record struct LogicalPageReference(DocumentPageId Id, StructuralPageRotation StructuralRotation)
 {
     public int SourcePageIndex => Id.SourcePageIndex;
+    public Guid SourceDocumentId => Id.SourceDocumentId;
+    public SourcePageIdentity Source => Id.Source;
     public VisualRotation DisplayRotation(VisualRotation visual) => StructuralRotation.Compose(visual);
 }

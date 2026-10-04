@@ -789,8 +789,9 @@ public sealed class PdfViewerRendererTests
     {
         FakeEngine engine = new();
         await using PdfViewerRenderer viewer = new(() => engine);
-        await viewer.OpenAsync("source");
-        Core.Documents.LogicalPageReference page = new(new(Guid.NewGuid(), 4), new(90));
+        Guid sourceId = Guid.NewGuid();
+        await viewer.OpenDocumentAsync("source", sourceId);
+        Core.Documents.LogicalPageReference page = new(new(sourceId, 4), new(90));
         PageRenderTarget request = PageRenderTarget.FromLogicalPage(page, new(96, 96), new(90));
         Assert.Equal(4, request.PageIndex);
         Assert.Equal(180, request.Rotation.Degrees);
@@ -808,6 +809,105 @@ public sealed class PdfViewerRendererTests
             page with { StructuralRotation = new(180) }, new(96, 96), new(90))])[0];
         Assert.False(rotated.FromCache);
         Assert.Equal(2, engine.RenderCount);
+    }
+
+    [Fact]
+    public async Task ImportedSourcesRouteRasterTextAndThumbnailsWithoutEagerWorkAndAreClosedOnReplacement()
+    {
+        FakeEngine engine = new() { PageCount = 1001 };
+        await using PdfViewerRenderer viewer = new(() => engine, cacheBudgetBytes: 100_000);
+        Guid main = Guid.NewGuid(), imported = Guid.NewGuid();
+        await viewer.OpenDocumentAsync("main", main);
+        var metadata = await viewer.PrepareSourceAsync("import", imported);
+        Assert.Equal(1001, metadata.PageCount);
+        Assert.Equal(0, engine.RenderCount);
+        Assert.Equal(0, engine.TextCount);
+        using (var a = await viewer.RenderVisible([new(0, new(96, 96), default, main)])[0])
+            Assert.Equal(0, a.Pixels.Pixels.Span[0]);
+        using (var b = await viewer.RenderVisible([new(0, new(96, 96), default, imported)])[0])
+            Assert.Equal(100, b.Pixels.Pixels.Span[0]);
+        using (var reused = await viewer.RenderVisible([new(0, new(96, 96), default, imported)])[0])
+            Assert.True(reused.FromCache);
+        var mainText = await viewer.ExtractTextAsync(0, main);
+        var importedText = await viewer.ExtractTextAsync(0, imported);
+        Assert.NotSame(mainText, importedText);
+        Assert.Same(importedText, await viewer.ExtractTextAsync(0, imported));
+        Assert.Equal(2, engine.TextCount);
+        Assert.True(viewer.TryRequestThumbnail(0, out var thumbnail, default, imported));
+        using (var result = await thumbnail!) Assert.Equal(100, result.Pixels.Pixels.Span[0]);
+        Assert.Equal(3, engine.RenderCount);
+        await viewer.OpenDocumentAsync("replacement", Guid.NewGuid());
+        Assert.Equal(2, engine.ClosedDocuments);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => viewer.ExtractTextAsync(0, imported));
+    }
+
+    [Fact]
+    public async Task ReplacementCancelsStagedMetadataAndDisposesItsTemporarySession()
+    {
+        FakeEngine engine = new() { BlockImportedMetadata = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        await viewer.OpenDocumentAsync("main", Guid.NewGuid());
+        Task<Core.Documents.PdfSourceDocument> preparing = viewer.PrepareSourceAsync("import", Guid.NewGuid());
+        try
+        {
+            await engine.Started.Task.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Task<IReadOnlyList<PdfPageSize>> replacement = viewer.OpenDocumentAsync("replacement", Guid.NewGuid());
+            engine.Release.Set();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => preparing);
+            await replacement;
+            Assert.Equal(2, engine.ClosedDocuments);
+            Assert.Equal(0, engine.RenderCount);
+        }
+        finally { engine.Release.Set(); }
+    }
+
+    [Fact]
+    public async Task FailedStagingClosesTemporarySourceAndPreservesMainSessionAndCache()
+    {
+        FakeEngine engine = new() { FailImportedMetadata = true };
+        await using PdfViewerRenderer viewer = new(() => engine);
+        Guid main = Guid.NewGuid(), imported = Guid.NewGuid();
+        await viewer.OpenDocumentAsync("main", main);
+        using var before = await viewer.RenderVisible([new(0, new(96, 96), default, main)])[0];
+        await Assert.ThrowsAsync<InvalidDataException>(() => viewer.PrepareSourceAsync("import", imported));
+        Assert.Equal(1, engine.ClosedDocuments);
+        using var after = await viewer.RenderVisible([new(0, new(96, 96), default, main)])[0];
+        Assert.True(after.FromCache);
+        Assert.Equal(1, engine.RenderCount);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => viewer.ExtractTextAsync(0, imported));
+    }
+
+    [Fact]
+    public async Task CacheBudgetsAreSharedAcrossSourcesRatherThanMultipliedPerImport()
+    {
+        FakeEngine engine = new();
+        await using PdfViewerRenderer viewer = new(() => engine, cacheBudgetBytes: 96 * 96 * 4,
+            thumbnailBudgetBytes: 144 * 144 * 4);
+        Guid a = Guid.NewGuid(), b = Guid.NewGuid();
+        await viewer.OpenDocumentAsync("main", a);
+        await viewer.PrepareSourceAsync("import", b);
+        foreach (Guid id in new[] { a, b, a })
+        {
+            using var rendered = await viewer.RenderVisible([new(0, new(96, 96), default, id)])[0];
+            Assert.False(rendered.FromCache);
+        }
+        Assert.Equal(3, engine.RenderCount);
+        Assert.Equal(1, engine.Owners[0].DisposeCount);
+        foreach (Guid id in new[] { a, b, a })
+        {
+            Assert.True(viewer.TryRequestThumbnail(0, out var task, default, id));
+            using var thumbnail = await task!;
+            Assert.False(thumbnail.FromCache);
+        }
+        Assert.Equal(6, engine.RenderCount);
+        for (int index = 0; index < 9; index++)
+        {
+            await viewer.ExtractTextAsync(index, a);
+            await viewer.ExtractTextAsync(index, b);
+        }
+        Assert.Equal(18, engine.TextCount);
+        await viewer.ExtractTextAsync(0, a);
+        Assert.Equal(19, engine.TextCount); // More than 16 total physical text pages evicts the oldest.
     }
 
     private sealed class FakeEngine : IPdfRenderer
@@ -830,14 +930,16 @@ public sealed class PdfViewerRendererTests
         public int RenderCount { get; private set; }
         public int ClosedDocuments { get; private set; }
         public bool Disposed { get; private set; }
-        public IPdfRenderSession Open(string filePath) => new Session(this);
+        public bool BlockImportedMetadata { get; init; }
+        public bool FailImportedMetadata { get; init; }
+        public IPdfRenderSession Open(string filePath) => new Session(this, Path.GetFileName(filePath) == "import" ? 100 : 0);
         public void Dispose()
         {
             Disposed = true;
             Release.Dispose();
         }
 
-        private sealed class Session(FakeEngine engine) : IPdfRenderSession
+        private sealed class Session(FakeEngine engine, int marker) : IPdfRenderSession
         {
             public Core.Outline.PdfOutline ExtractOutline()
             {
@@ -861,12 +963,13 @@ public sealed class PdfViewerRendererTests
                     engine.Release.Wait();
                 }
                 if (engine.FailText) throw new InvalidDataException("Test text failure.");
-                return new([new((uint)('A' + pageIndex), default)]);
+                return new([new((uint)('A' + pageIndex + marker), default)]);
             }
             public int PageCount => engine.PageCount;
             public PdfPageSize GetPageSize(int pageIndex)
             {
-                if (engine.BlockGeometry)
+                if (engine.FailImportedMetadata && marker == 100) throw new InvalidDataException("Invalid imported metadata.");
+                if (engine.BlockGeometry || (engine.BlockImportedMetadata && marker == 100))
                 {
                     engine.Started.TrySetResult();
                     engine.Release.Wait();
@@ -886,7 +989,7 @@ public sealed class PdfViewerRendererTests
                 }
 
                 TrackingOwner owner = new(pixelWidth * pixelHeight * 4);
-                owner.Memory.Span.Fill((byte)(pageIndex + rotation.QuarterTurns * 10));
+                owner.Memory.Span.Fill((byte)(marker + pageIndex + rotation.QuarterTurns * 10));
                 engine.Owners.Add(owner);
                 return new RenderedPage(pixelWidth, pixelHeight, pixelWidth * 4, RenderedPixelFormat.Bgra32, owner);
             }

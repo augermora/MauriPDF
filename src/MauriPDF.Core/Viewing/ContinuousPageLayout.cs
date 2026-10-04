@@ -23,30 +23,34 @@ public sealed class ContinuousPageLayout
     private readonly int _firstPage;
     private readonly IReadOnlyList<LogicalPageReference>? _logicalPages;
     private readonly int _gap;
+    private readonly IReadOnlyList<PdfPageSize> _sourcePages;
+    private readonly IReadOnlyDictionary<Guid, PdfSourceDocument>? _sources;
     public VisualRotation Rotation { get; }
     public ViewerDisplayMode DisplayMode { get; }
 
     public ContinuousPageLayout(IReadOnlyList<PdfPageSize> pages, ViewerState state, int width, int height,
-        IReadOnlyList<LogicalPageReference>? logicalPages = null, double displayDpi = 96)
+        IReadOnlyList<LogicalPageReference>? logicalPages = null, double displayDpi = 96,
+        IReadOnlyDictionary<Guid, PdfSourceDocument>? sources = null)
     {
         ArgumentNullException.ThrowIfNull(pages);
         if (!double.IsFinite(displayDpi) || displayDpi <= 0) throw new ArgumentOutOfRangeException(nameof(displayDpi));
         _gap = Math.Max(1, checked((int)Math.Round(Gap * displayDpi / 96)));
         if ((logicalPages?.Count ?? pages.Count) != state.PageCount) throw new ArgumentException("Page count mismatch.", nameof(pages));
         _logicalPages = logicalPages;
+        _sourcePages = pages; _sources = sources;
         int availableWidth = Math.Max(1, width - 2 * _gap);
         int availableHeight = Math.Max(1, height - 2 * _gap);
         Rotation = state.Rotation;
         DisplayMode = state.DisplayMode;
         _firstPage = DisplayMode == ViewerDisplayMode.SinglePage ? state.PageIndex : 0;
-        PdfPageSize reference = RotationForPage(state.PageIndex).EffectiveSize(pages[SourcePageIndex(state.PageIndex)]);
+        PdfPageSize reference = RotationForPage(state.PageIndex).EffectiveSize(SizeForPage(state.PageIndex));
         double fitScale = Math.Min(availableWidth / reference.WidthPoints, availableHeight / reference.HeightPoints);
         _pages = new PageGeometry[DisplayMode == ViewerDisplayMode.SinglePage ? 1 : state.PageCount];
         double top = _gap;
         for (int offset = 0; offset < _pages.Length; offset++)
         {
             int index = _firstPage + offset;
-            PdfPageSize page = RotationForPage(index).EffectiveSize(pages[SourcePageIndex(index)]);
+            PdfPageSize page = RotationForPage(index).EffectiveSize(SizeForPage(index));
             if (!double.IsFinite(page.WidthPoints) || !double.IsFinite(page.HeightPoints)
                 || page.WidthPoints <= 0 || page.HeightPoints <= 0) throw new ArgumentOutOfRangeException(nameof(pages));
             double scale = state.ZoomMode switch
@@ -66,6 +70,9 @@ public sealed class ContinuousPageLayout
     }
 
     public int Count => _pages.Length;
+    public PdfPageSize SizeForPage(int logicalIndex) => _sources is not null && _logicalPages is not null
+        ? _sources[_logicalPages[logicalIndex].SourceDocumentId].Pages[SourcePageIndex(logicalIndex)]
+        : _sourcePages[SourcePageIndex(logicalIndex)];
     public int SourcePageIndex(int logicalIndex) => _logicalPages?[logicalIndex].SourcePageIndex ?? logicalIndex;
     public VisualRotation RotationForPage(int logicalIndex) => _logicalPages?[logicalIndex].DisplayRotation(Rotation) ?? Rotation;
     public double Width { get; }

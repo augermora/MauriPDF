@@ -18,6 +18,7 @@ internal sealed partial class ContinuousPdfView : Control
     private readonly HashSet<int> _failed = [];
     private IReadOnlyList<PdfPageSize>? _sizes;
     private IReadOnlyList<LogicalPageReference>? _logicalPages;
+    private IReadOnlyDictionary<Guid, PdfSourceDocument>? _sources;
     private ViewerState? _state;
     private ContinuousPageLayout? _layout;
     private PageRange _range = new(0, -1);
@@ -67,7 +68,7 @@ internal sealed partial class ContinuousPdfView : Control
         get
         {
             if (_layout is null || _state is null || _sizes is null || !_layout.ContainsPage(_state.PageIndex)) return null;
-            PdfPageSize size = _layout.RotationForPage(_state.PageIndex).EffectiveSize(_sizes[SourcePageIndex(_state.PageIndex)]);
+            PdfPageSize size = _layout.RotationForPage(_state.PageIndex).EffectiveSize(_layout.SizeForPage(_state.PageIndex));
             return _layout[_state.PageIndex].Width / (size.WidthPoints * DeviceDpi / 72.0) * 100;
         }
     }
@@ -77,7 +78,8 @@ internal sealed partial class ContinuousPdfView : Control
     private double MaxTop => _layout?.MaximumScrollTop(ViewHeight) ?? 0;
     private double MaxLeft => Math.Max(0, (_layout?.Width ?? 0) - ViewWidth);
 
-    public void SetDocument(IReadOnlyList<PdfPageSize>? sizes, IReadOnlyList<LogicalPageReference>? logicalPages = null)
+    public void SetDocument(IReadOnlyList<PdfPageSize>? sizes, IReadOnlyList<LogicalPageReference>? logicalPages = null,
+        IReadOnlyDictionary<Guid, PdfSourceDocument>? sources = null)
     {
         SetSearch(null, 0);
         ClearSelection();
@@ -87,6 +89,7 @@ internal sealed partial class ContinuousPdfView : Control
         _failed.Clear();
         _sizes = sizes;
         _logicalPages = logicalPages;
+        _sources = sources;
         _state = sizes is { Count: > 0 } ? new ViewerState(logicalPages?.Count ?? sizes.Count) : null;
         _layout = null;
         _range = new(0, -1);
@@ -95,6 +98,7 @@ internal sealed partial class ContinuousPdfView : Control
     }
 
     public int SourcePageIndex(int logicalIndex) => _logicalPages?[logicalIndex].SourcePageIndex ?? logicalIndex;
+    public Guid SourceDocumentId(int logicalIndex) => _logicalPages?[logicalIndex].SourceDocumentId ?? Guid.Empty;
 
     public void ApplyEditedPages(IReadOnlyList<LogicalPageReference> pages, ViewerState state, bool sequenceChanged)
     {
@@ -162,7 +166,7 @@ internal sealed partial class ContinuousPdfView : Control
         try
         {
             ContinuousPageLayout? next = _sizes is not null && _state is not null
-                ? new ContinuousPageLayout(_sizes, _state, ViewWidth, ViewHeight, _logicalPages, DeviceDpi) : null;
+                ? new ContinuousPageLayout(_sizes, _state, ViewWidth, ViewHeight, _logicalPages, DeviceDpi, _sources) : null;
             CancelDemand();
             _failed.Clear();
             _layout = next;

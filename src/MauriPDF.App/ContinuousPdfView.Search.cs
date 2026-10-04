@@ -71,7 +71,7 @@ internal sealed partial class ContinuousPdfView
             {
                 try
                 {
-                    PdfTextPage text = await _renderer.SearchGeometryAsync(workerGeneration, SourcePageIndex(page));
+                    PdfTextPage text = await _renderer.SearchGeometryAsync(workerGeneration, SourcePageIndex(page), SourceDocumentId(page));
                     if (_disposed || generation != _searchViewGeneration) return;
                     // Separate UI reference bound, not a second document-wide geometry cache.
                     if (_searchPages.Values.Sum(value => value.Count) + text.Count > TextSelection.MaximumCharacters)

@@ -2,7 +2,7 @@ using MauriPDF.Core.Documents;
 
 namespace MauriPDF.Editing;
 
-/// <summary>UI-independent edit history. Entries contain only one page value, positions and revision IDs.</summary>
+/// <summary>UI-independent edit history. Entries retain affected page values, positions and revision IDs, not whole snapshots.</summary>
 public sealed class DocumentEditSession
 {
     public const int MaximumHistory = 100;
@@ -10,11 +10,21 @@ public sealed class DocumentEditSession
     private readonly List<Entry> _redo = [];
     private long _nextRevision;
     private long _baselineRevision;
+    public const int MaximumLogicalPages = 100_000;
+    public DocumentSourceRegistry Sources { get; } = new();
+    public DocumentPageId? SuggestedCurrentPageId { get; private set; }
 
-    public DocumentEditSession(int sourcePageCount)
+    public DocumentEditSession(PdfSourceDocument source) : this(source.PageCount, source.Id)
+    {
+        Sources.Add(source);
+    }
+
+    public DocumentEditSession(int sourcePageCount) : this(sourcePageCount, Guid.NewGuid()) { }
+
+    private DocumentEditSession(int sourcePageCount, Guid source)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(sourcePageCount);
-        Guid source = Guid.NewGuid();
+        if (sourcePageCount > MaximumLogicalPages) throw new InvalidOperationException("A composition is limited to 100,000 logical pages.");
         LogicalPageReference[] pages = new LogicalPageReference[sourcePageCount];
         for (int index = 0; index < pages.Length; index++) pages[index] = new(new(source, index), default);
         State = new(source, 0, pages);
@@ -66,6 +76,33 @@ public sealed class DocumentEditSession
         return true;
     }
 
+    /// <summary>One atomic range insertion and one history entry; validation precedes all mutation.</summary>
+    public void Import(PdfSourceDocument source, int first, int count, int insertionIndex, DocumentPageId currentPage)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        if (first < 0 || count <= 0 || (long)first + count > source.PageCount) throw new ArgumentOutOfRangeException(nameof(first));
+        if (insertionIndex < 0 || insertionIndex > State.Pages.Count) throw new ArgumentOutOfRangeException(nameof(insertionIndex));
+        if (State.LogicalIndex(currentPage) is null) throw new ArgumentException("The current page must belong to the composition.", nameof(currentPage));
+        if ((long)State.Pages.Count + count > MaximumLogicalPages) throw new InvalidOperationException("A composition is limited to 100,000 logical pages.");
+        Sources.ValidateAddition(source);
+        LogicalPageReference[] imported = Enumerable.Range(first, count)
+            .Select(index => new LogicalPageReference(new(source.Id, index, Guid.NewGuid()), default)).ToArray();
+        Entry entry = new(default, default, -1, insertionIndex, State.Revision, _nextRevision + 1, imported, currentPage);
+        // Construct the immutable result before publishing registry/state/history changes.
+        var pages = State.Pages.ToList();
+        pages.InsertRange(insertionIndex, imported);
+        EditedDocumentState next = new(State.SourceDocumentId, entry.AfterRevision, pages.ToArray());
+        Sources.Add(source);
+        _nextRevision++;
+        State = next; EditGeneration++;
+        SuggestedCurrentPageId = imported[0].Id;
+        _undo.Add(entry);
+        if (_undo.Count > MaximumHistory) _undo.RemoveAt(0);
+        _redo.Clear();
+    }
+
+    public PdfMaterializationPlan CreateMaterializationPlan() => PdfMaterializationPlan.From(State, Sources.Sources.Values);
+
     public bool Undo()
     {
         if (!CanUndo) return false;
@@ -89,6 +126,16 @@ public sealed class DocumentEditSession
     private void Apply(Entry entry, bool forward)
     {
         List<LogicalPageReference> pages = State.Pages.ToList();
+        SuggestedCurrentPageId = null;
+        if (entry.Imported is not null)
+        {
+            if (forward) pages.InsertRange(entry.AfterIndex, entry.Imported);
+            else pages.RemoveRange(entry.AfterIndex, entry.Imported.Length);
+            SuggestedCurrentPageId = forward ? entry.Imported[0].Id : entry.PreviousCurrent;
+            State = new(State.SourceDocumentId, forward ? entry.AfterRevision : entry.BeforeRevision, pages.ToArray());
+            EditGeneration++;
+            return;
+        }
         int remove = forward ? entry.BeforeIndex : entry.AfterIndex;
         int insert = forward ? entry.AfterIndex : entry.BeforeIndex;
         if (remove >= 0) pages.RemoveAt(remove);
@@ -98,5 +145,6 @@ public sealed class DocumentEditSession
     }
 
     private readonly record struct Entry(LogicalPageReference Before, LogicalPageReference After,
-        int BeforeIndex, int AfterIndex, long BeforeRevision, long AfterRevision);
+        int BeforeIndex, int AfterIndex, long BeforeRevision, long AfterRevision,
+        LogicalPageReference[]? Imported = null, DocumentPageId PreviousCurrent = default);
 }

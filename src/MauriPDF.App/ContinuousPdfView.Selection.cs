@@ -116,7 +116,7 @@ internal sealed partial class ContinuousPdfView
         {
             if (!_textPages.TryGetValue(anchor.Page, out PdfTextPage? anchorText))
             {
-                anchorText = await _renderer.ExtractTextAsync(SourcePageIndex(anchor.Page));
+                anchorText = await _renderer.ExtractTextAsync(SourcePageIndex(anchor.Page), SourceDocumentId(anchor.Page));
                 if (_disposed || interaction != _interaction) return;
                 _textPages.Add(anchor.Page, anchorText);
             }
@@ -141,7 +141,7 @@ internal sealed partial class ContinuousPdfView
                     if (!_textPages.ContainsKey(page)) { missing = page; break; }
                 if (missing >= 0)
                 {
-                    PdfTextPage text = await _renderer.ExtractTextAsync(SourcePageIndex(missing));
+                    PdfTextPage text = await _renderer.ExtractTextAsync(SourcePageIndex(missing), SourceDocumentId(missing));
                     if (_disposed || interaction != _interaction) return;
                     if (_textPages.Values.Sum(page => page.Count) + text.Count > TextSelection.MaximumCharacters)
                     {

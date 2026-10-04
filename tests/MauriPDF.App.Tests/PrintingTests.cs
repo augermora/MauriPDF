@@ -65,12 +65,52 @@ public sealed class PrintingTests
         Assert.Equal(1001, snapshot.Pages.Count);
     }
 
+    [Fact]
+    public void PrintDocumentRoutesAnImmutableCompositionAndDisposesEveryOwnedSourceWithoutSpooling()
+    {
+        var a = new Core.Documents.PdfSourceDocument(Guid.NewGuid(), "a.pdf", [new(200, 400)]);
+        var b = new Core.Documents.PdfSourceDocument(Guid.NewGuid(), "b.pdf", [new(200, 400)]);
+        DocumentEditSession edits = new(a);
+        edits.Import(b, 0, 1, 1, edits.State.Pages[0].Id);
+        edits.Execute(new RotatePageEdit(edits.State.Pages[1].Id, true));
+        var snapshot = edits.CreateMaterializationPlan();
+        edits.Undo(); edits.Undo();
+        PrintEngine engine = new();
+        using Bitmap target = new(100, 100);
+        using Graphics graphics = Graphics.FromImage(target);
+        using (PdfPrintDocument document = new(new(a.Path, "composition", snapshot, 0), new PrinterSettings(), 0, 1,
+            () => engine, new Progress<int>(), CancellationToken.None))
+        {
+            typeof(PdfPrintDocument).GetMethod("OnBeginPrint", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+                .Invoke(document, [new PrintEventArgs()]);
+            document.DrawPage(0, graphics, new(0, 0, 20, 20));
+            document.DrawPage(1, graphics, new(0, 0, 20, 20));
+            document.DrawPage(1, graphics, new(0, 0, 20, 20));
+            Assert.Equal(2, engine.Sources.Count);
+            Assert.Equal(1, engine.Sources["a.pdf"].Renders);
+            Assert.Equal(2, engine.Sources["b.pdf"].Renders);
+            Assert.Equal(90, engine.Sources["b.pdf"].Rotation.Degrees);
+            Assert.True(engine.Sources.Values.All(s => s.PixelsDisposed));
+        }
+        Assert.True(engine.Disposed);
+        Assert.True(engine.Sources.Values.All(s => s.Closed));
+    }
+
+    private sealed class PrintEngine : IPdfRenderer
+    {
+        public Dictionary<string, Session> Sources { get; } = [];
+        public bool Disposed;
+        public IPdfRenderSession Open(string filePath) { Session session = new(); Sources.Add(filePath, session); return session; }
+        public void Dispose() => Disposed = true;
+    }
+
     private sealed class Session : IPdfRenderSession
     {
         public int PageCount => 1001;
         public int Renders, SourceIndex, Width, Height;
         public VisualRotation Rotation;
         public bool PixelsDisposed;
+        public bool Closed;
         public PdfPageSize GetPageSize(int pageIndex) => new(200, 400);
         public RenderedPage RenderPage(int pageIndex, int pixelWidth, int pixelHeight, VisualRotation rotation = default)
         {
@@ -80,7 +120,7 @@ public sealed class PrintingTests
         }
         public PdfTextPage ExtractText(int pageIndex) => throw new InvalidOperationException("Print must not extract text.");
         public PdfOutline ExtractOutline() => throw new InvalidOperationException("Print must not extract outlines.");
-        public void Dispose() { }
+        public void Dispose() => Closed = true;
     }
     private sealed class Pixels(int length, Action disposed) : IMemoryOwner<byte>
     {

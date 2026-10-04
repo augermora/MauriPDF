@@ -37,6 +37,7 @@ internal sealed partial class MainForm
         _copy.AccessibleName = "Copy selection";
         _find.Click += (_, _) => _searchBar.OpenSearch();
         _print.Click += async (_, _) => await PrintAsync();
+        _insertPages.Click += async (_, _) => await ChooseImportAsync();
         _copy.Click += (_, _) => _viewport.CopySelection();
         _showThumbnails.Click += (_, _) => ShowNavigationTab(0);
         _showOutline.Click += (_, _) => ShowNavigationTab(1);
@@ -46,7 +47,7 @@ internal sealed partial class MainForm
         _commandSources = new ToolStrip();
         _commandSources.Items.AddRange([_fileMenu, _open, _save, _saveAs, _print, _toggleThumbnails,
             _zoomOut, _resetZoom, _zoomIn, _zoomLabel, _fitPage, _fitWidth, _displayMode,
-            _rotateLeft, _rotateRight, _pageEdits, _find, _copy, _showThumbnails, _showOutline]);
+            _rotateLeft, _rotateRight, _pageEdits, _find, _copy, _showThumbnails, _showOutline, _insertPages]);
         _ribbon = new RibbonHost(_theme, _icons);
 
         var file = _ribbon.AddTab("File");
@@ -73,6 +74,8 @@ internal sealed partial class MainForm
         _ribbon.Add(fit, _fitPage, "Fit page", CommandIcon.FitPage);
 
         var pages = _ribbon.AddTab("Pages");
+        var import = _ribbon.AddGroup(pages, "Import");
+        _ribbon.Add(import, _insertPages, "Insert pages", CommandIcon.Open, true);
         var organize = _ribbon.AddGroup(pages, "Page order");
         _ribbon.Add(organize, _moveEarlier, "Move earlier", CommandIcon.Earlier);
         _ribbon.Add(organize, _moveLater, "Move later", CommandIcon.Later);
@@ -164,6 +167,7 @@ internal sealed partial class MainForm
         if (_resourcesDisposed) return;
         if (_welcome is not null) _welcome.Visible = _state is null;
         _print.Enabled = _edits is not null && _sourcePath is not null && !_closing && !DocumentBusy;
+        _insertPages.Enabled = _edits is not null && !_closing && !DocumentBusy;
         _find.Enabled = _state is not null && !_closing;
         _copy.Enabled = _state is not null && !_closing && _viewport.CanCopySelection;
         _showThumbnails.Enabled = _showOutline.Enabled = _toggleThumbnails.Enabled = !_closing;

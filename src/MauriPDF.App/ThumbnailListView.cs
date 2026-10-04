@@ -244,7 +244,7 @@ internal sealed class ThumbnailListView : ListView
             {
                 int sourceIndex = _logicalPages?[index].SourcePageIndex ?? index;
                 var rotation = _logicalPages?[index].DisplayRotation(_rotation) ?? _rotation;
-                if (!_renderer.TryRequestThumbnail(sourceIndex, out Task<ViewerRenderResult>? task, rotation)) continue;
+                if (!_renderer.TryRequestThumbnail(sourceIndex, out Task<ViewerRenderResult>? task, rotation, _logicalPages?[index].SourceDocumentId ?? Guid.Empty)) continue;
                 using ViewerRenderResult result = await task!;
                 if (_disposed || !_active || generation != _generation) return;
                 Bitmap bitmap = WinFormsImageConverter.CreateBitmap(result.Pixels);

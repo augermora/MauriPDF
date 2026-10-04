@@ -13,12 +13,14 @@ internal sealed class PdfiumRenderSession : IPdfRenderSession
 
     private FpdfDocumentT? _document;
     private IDisposable? _libraryLease;
+    private FileStream? _sourceLock;
 
-    public PdfiumRenderSession(FpdfDocumentT document, int pageCount, IDisposable libraryLease)
+    public PdfiumRenderSession(FpdfDocumentT document, int pageCount, IDisposable libraryLease, FileStream sourceLock)
     {
         _document = document;
         _libraryLease = libraryLease;
         PageCount = pageCount;
+        _sourceLock = sourceLock;
     }
 
     public int PageCount { get; }
@@ -195,6 +197,7 @@ internal sealed class PdfiumRenderSession : IPdfRenderSession
 
     public void Dispose()
     {
+        if (_document is null && _libraryLease is null) return;
         using IDisposable nativeCall = PdfiumRuntime.Enter();
         try
         {
@@ -208,6 +211,8 @@ internal sealed class PdfiumRenderSession : IPdfRenderSession
             _document = null;
             _libraryLease?.Dispose();
             _libraryLease = null;
+            _sourceLock?.Dispose();
+            _sourceLock = null;
         }
     }
 

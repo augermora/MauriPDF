@@ -7,10 +7,12 @@ internal static class FilePathIdentity
 {
     public static void RejectSourceAlias(string sourcePath, string destinationPath)
     {
-        if (string.Equals(Path.GetFullPath(sourcePath), Path.GetFullPath(destinationPath), StringComparison.OrdinalIgnoreCase)
-            || (File.Exists(destinationPath) && Get(sourcePath) == Get(destinationPath)))
+        if (SameFile(sourcePath, destinationPath))
             throw new IOException("The destination resolves to the currently open source PDF. Choose a different file.");
     }
+    public static bool SameFile(string first, string second) =>
+        string.Equals(Path.GetFullPath(first), Path.GetFullPath(second), StringComparison.OrdinalIgnoreCase)
+        || (File.Exists(first) && File.Exists(second) && Get(first) == Get(second));
 
     private static FileIdentity Get(string path)
     {

@@ -446,7 +446,7 @@ Deterministic tests cover copied immutable hierarchy/order/Unicode, empty and nu
 
 The source PDF session and original page metadata remain unchanged throughout editing and Save As. Edits exist in managed memory until explicitly materialized to a different path. PDFiumCore remains 154.0.8035; dependencies, GPLv3 and privacy guarantees are unchanged.
 
-Core's `DocumentPageId` is `(SourceDocumentId: Guid, SourcePageIndex: int)`. A fresh opened document receives a new Guid; the source index never changes. `LogicalPageReference` adds a distinct `StructuralPageRotation` value to that identity. There is exactly one logical reference per retained source page, with no duplication or insertion. Logical index is merely its current position in `EditedDocumentState.Pages`, never its identity. `PdfMaterializationPlan` copies source index and structural rotation from this sequence without consulting UI state.
+Core's `SourcePageIdentity` is `(SourceDocumentId: Guid, SourcePageIndex: int)`. `DocumentPageId` adds an immutable `InstanceId` discriminator: original pages use the canonical empty instance and every imported reference gets a new Guid. Two imports may refer to the same physical page without sharing logical identity. `LogicalPageReference` adds a distinct `StructuralPageRotation`. Logical index is merely the current position in `EditedDocumentState.Pages`, never identity. The materialization plan copies physical identity and structural rotation, not logical instance IDs or UI state.
 
 Editing owns `EditedDocumentState`: a read-only array of lightweight references, revision ID and private stable-ID-to-logical-index map. `LogicalIndexForSource` returns null for a removed source page. Each transition creates a new array/map, leaving earlier snapshots immutable. For source A B C D E, moving E before B, deleting C and rotating D yields A E B D↻ while the source remains A B C D E.
 
@@ -462,7 +462,7 @@ The Pages menu exposes current-page Delete, Earlier/Later, structural rotation, 
 
 ### Shared geometry, source requests and rotation
 
-Both display modes consume the same edited sequence. `ContinuousPageLayout` maps logical positions to the original source sizes; Continuous rebuilds lightweight geometry, while Single Page retains one geometry entry. `ResolveCurrentPage` preserves a surviving stable identity on moves/unrelated deletes. If the current page is deleted it chooses the following logical page, or the previous page at the end. Relayout carries the approximate neutral page-relative viewport anchor onto the resolved current page, subject to ordinary viewport clamps.
+Both display modes consume the same edited sequence. `ContinuousPageLayout` maps logical positions through source identity to registered source dimensions; Continuous rebuilds lightweight geometry, while Single Page retains one geometry entry. `ResolveCurrentPage` preserves a surviving stable identity on moves/unrelated deletes. If the current page is deleted it chooses the following logical page, or the previous page at the end. Relayout carries the approximate neutral page-relative viewport anchor onto the resolved current page, subject to ordinary viewport clamps.
 
 Displayed orientation is `(source intrinsic + structural edit + visual view) mod 360`. PDFium already applies intrinsic orientation and CropBox, so the **additional device rotation is only `(structural + visual) mod 360`**. `StructuralPageRotation.Compose` produces that neutral display value without merging the underlying edit/view state. Effective dimensions swap at additional 90°/270°. Geometry, raster sizing, thumbnails, text hit testing, selection/search boxes and result navigation all use the same per-logical-page composed rotation. Intrinsic orientation is not applied twice; no Bitmap post-rotation is used.
 
@@ -484,7 +484,7 @@ Sequence changes immediately invalidate active search results/work and restart a
 
 Tests cover stable identity, mappings, transitions, bounds, original/dirty revisions, all 64 intrinsic/structural/visual quarter-turn combinations, layout/current-page behavior in both modes, source cache reuse and existing stale-worker disposal. The ignored WinForms harness extends actual UI validation with edit commands, search/selection/outline remapping, a gated pre-edit render completion, repeated Undo/Redo, logical thumbnails and both Discard/Cancel paths on 1,001 source pages. Metadata/maps remain O(page count), history O(100), and raster work O(bounded visible demand), not O(document pages).
 
-There is no ordinary Save, page insertion/import, duplication, extraction/export, merge, multi-page edits, drag/drop reordering or annotation editing. Long histories cannot always return to an older baseline after eviction. Continuous geometry and immutable metadata rebuilding are synchronous O(page count); the 1,001-page checks do not establish a maximum practical document size or native memory/time guarantee. Real-world interactive review remains advisable.
+There is no separate duplication command, extraction/export, full document merge, drag/drop reordering or annotation editing. Long histories cannot always return to an older baseline after eviction. Continuous geometry and immutable metadata rebuilding are synchronous O(page count); the 1,001-page checks do not establish a native memory/time guarantee. Real-world interactive review remains advisable.
 
 ## Save As materialization
 
@@ -496,7 +496,7 @@ Editing owns the neutral `IPdfDocumentMaterializer`, immutable `PdfMaterializati
 
 ### Physical page construction and rotation
 
-The plan is an immutable array of `(SourcePageIndex, StructuralRotationDegrees)` plus its edit revision. Viewer rotation is absent by construction. The materializer opens the immutable source independently, creates a new PDFium destination, and passes the complete logical source-index sequence once to `FPDF_ImportPagesByIndex`. Deleted pages are absent and moved pages are physically imported at their logical positions. This is O(page count) index/metadata work and PDF object copying; it does not render every page, populate viewer caches, or extract text.
+The plan is an immutable array of `(SourceDocumentId, SourcePageIndex, StructuralRotationDegrees)` plus its edit revision and immutable source descriptors. Viewer rotation is absent. The materializer opens each required source independently and keeps all handles alive until destination construction finishes. Consecutive same-source runs are passed to `FPDF_ImportPagesByIndex` with explicit zero-based source indices and the run's zero-based final destination insertion position. Repeated calls append runs at their intended positions, including A/B/A interleaving and repeated source pages. Deterministic real-PDF tests verify physical output text order. Index construction is O(page count); there is no Save rasterization or viewer cache population.
 
 For each imported page, PDFium reports the copied intrinsic `/Rotate` as quarter turns. The writer stores `(imported intrinsic quarter-turns + structural quarter-turns) mod 4`. It does not use `ViewerState.Rotation`, and therefore does not double-apply or persist view-only rotation. The real-output fixture verifies 90/180/270 combinations, effective dimensions, reordered labels, text extraction and a rendered first page.
 
@@ -506,11 +506,11 @@ The new destination catalog is intentionally not copied, so document metadata, o
 
 ### Transaction, validation and ownership
 
-Save and Save As reject the current `SourcePath` after full-path, case-insensitive normalization and, when the destination exists, by comparing Windows volume/file IDs (covering hard-link and resolved alias identity). Failure to establish identity fails conservatively. The check is repeated immediately before publication. The writer creates a unique temporary sibling with `CreateNew`, imports and serializes using a 64 KiB sequential `FileStream`, flushes it to disk, and closes both PDFium documents and the callback wrapper. It then reopens the temporary file with PDFium, checks a sensible nonzero length, exact page count, finite positive dimensions for every output page, and loads/renders an 8×8 first page.
+Save and Save As reject every registered source path after full-path, case-insensitive normalization and, when the destination exists, comparing Windows volume/file IDs (hard-link/resolved alias identity). Undo-only sources remain protected. Failure to establish identity fails conservatively. The check repeats immediately before publication. The writer creates a unique temporary sibling with `CreateNew`, serializes through a 64 KiB sequential `FileStream`, flushes to disk and closes native documents/callbacks. Validation reopens the output and checks nonzero length, exact count, expected dimensions and rotation on every page, and loadable text layers. Validation does not render pixels.
 
 Only validated output is published. A new target is installed with a same-volume move. An existing target is replaced with Windows `File.Replace` and a unique sibling backup—never delete-then-move. If destination identity capture fails after replacement, the writer attempts to restore that backup atomically; a backup is retained and named in the error if rollback itself fails. Failures before publication leave the prior destination untouched. Temporary and successful backup files are cleaned, subject to best-effort cleanup after exceptional filesystem denial.
 
-Source/destination documents, imported page handles, validation page/bitmap handles, write callback, streams, runtime leases and gate scopes have explicit `try/finally` or `using` ownership. No handle survives the operation. The source is opened read-only by PDFium and its bytes are regression-tested unchanged. The writer never invokes actions, JavaScript, URLs, embedded files or network access.
+Source/destination documents, imported/validation page and text handles, write callback, streams, runtime leases and gate scopes have explicit `try/finally` or `using` ownership. No writer handle survives the operation. Sources are opened read-only and their bytes are regression-tested unchanged. The writer never invokes actions, JavaScript, URLs, embedded files or network access.
 
 ### UI, snapshots and baseline
 
@@ -521,3 +521,72 @@ On success the viewer deliberately remains backed by the original `SourcePath`; 
 Ctrl+S routes to Save As until `SavedDocumentPath` exists, even for clean content. Each successful publication records file length, UTC last-write time, and SHA-256. Before ordinary Save, App checks that identity; the writer checks it again immediately before replacement. An intact clean destination makes Save a no-op. A changed destination offers Overwrite, Save As, or Cancel; a missing destination offers Recreate, Save As, or Cancel, and recreation requires the path to remain absent. Content dirty state and destination state remain independent. There remains a small filesystem race between the final identity/alias check and replacement because Windows provides no compare-and-replace operation for this content identity.
 
 Output catalog structures and links are deliberately conservative as described above; passwords are not prompted, signed output is not preserved as a valid signature, cancellation/progress percentage is absent, and an individual PDFium import/save call can monopolize the native gate. Large files are streamed through the writer callback and no document-wide rendering or text extraction occurs, but PDFium controls internal object-copy memory and no hard memory bound is asserted. True in-place replacement of the open source remains unsupported and would require a different source-document lifetime model.
+
+## Multi-source import and composition
+
+`DocumentEditSession.Sources` is the one editing-session registry of immutable `PdfSourceDocument`
+descriptors (ID, local path, page count and effective source dimensions). Core descriptors contain no
+native pointer, Bitmap or extracted text. Intrinsic orientation/CropBox are already incorporated in
+the existing PDFium dimension path; rendering adds structural plus viewer rotation, while writing
+reads the copied intrinsic `/Rotate` and adds only structural rotation.
+
+App coordinates **Pages → Insert Pages → local PDF → options**. The dialog uses 1-based inclusive
+endpoints and before/after current, beginning/end positions; Editing validates zero-based range,
+insertion position, current identity and capacity before mutation. Existing physical paths/aliases
+reuse the registered descriptor/session. New files open and read metadata on the rendering worker,
+remaining staged until validation/dialog acceptance. Cancellation/failure releases the staged
+session; no edit revision, baseline or selection changes before commit. During import, structural
+commands, another import, Save, Print, replacement and close are guarded. Read-only viewing remains
+available, though its native misses wait for the metadata operation. No eager rasters/text are made.
+
+Import publishes one immutable logical sequence and one history entry containing only imported
+references, insertion position, revisions and prior current identity. Undo removes that range;
+Redo restores exactly the same instance IDs. Import/Redo suggest its first page, Undo the prior
+current page. Dirty tracking remains revision-based, including saved compositions and subsequent
+Undo/Redo. All accepted sources remain registered until replacement/shutdown, even if their pages
+are absent or their history entry has been evicted. Limits are 64 registered sources, 250,000 total
+metadata pages and 100,000 logical pages. History retains up to 100 affected-page entries, not full
+document snapshots; large import entries can themselves retain substantial lightweight metadata.
+
+Rendering exclusively owns the main and imported native sessions on its serialized worker. Each
+has a distinct opaque cache identity; requests resolve source Guid + physical index, not logical
+position. Unknown/old source IDs fail rather than falling back to the main PDF. Main/thumbnail raster
+keys retain source identity, index, dimensions and effective additional rotation; source-text keys
+retain source identity/index. Different PDFs' page zero cannot collide, and multiple logical
+instances can safely reuse physical-page pixels/text. Budgets remain global across sources: 64 MiB
+main pixels, 8 MiB thumbnails, 8 MiB / 16 text pages. App still owns only bounded visible Bitmaps;
+the thumbnail sizing ImageList remains empty. Neutral buffers retain existing cache/caller disposal
+contracts. Replacement invalidates generations and closes every old session before opening anew;
+shutdown drains the worker. Temporary page/text/bitmap handles never escape native adapters.
+
+Native viewing sessions also own a read-only `FileStream` with `FileShare.Read` for their backing
+path. This prevents external write/delete while the composition depends on it. The stream closes
+with its native document/runtime lease. Writer and print jobs own independent sessions/handles;
+all public PDFium calls use the shared runtime gate. A print job lazily opens each required source
+once and draws/disposes one neutral page buffer and Bitmap at a time, preserving existing 300-DPI /
+8-megapixel semantics. Printing excludes viewer-only rotation. No screen cache/session is borrowed.
+
+Search iterates composed logical order progressively and maps physical matches to each distinct
+logical position, including repeated imported instances. Import clears selection and restarts an
+open search with its query retained; stale generations cannot publish obsolete geometry or results.
+Selection's bounded logical-page map resolves each entry against its own source, supporting
+cross-source Unicode copy. Original outlines continue to resolve only canonical original instances;
+deleting that page does not redirect its bookmark to a reimported copy. Imported outlines are not
+merged, and output catalog/link preservation limitations above remain unchanged.
+
+Save/Save As snapshot every registered descriptor and every retained output page. The writer uses
+`FPDF_LoadDocument`, `FPDF_CreateNewDocument`, `FPDF_ImportPagesByIndex`, `FPDF_LoadPage`,
+`FPDFPageGetRotation`, `FPDFPageSetRotation`, annotation enumeration/removal, `FPDF_SaveAsCopy`
+and `FPDF_FILEWRITE_`, with corresponding document/page/text close calls. Output is object import,
+not rasterization or a full document merge. Transactional publication, destination-change detection,
+backup/rollback and baseline semantics are unchanged. All backing paths, even Undo-only sources,
+are protected using `FilePathIdentity`; source bytes are never written by the app. PDFiumCore remains
+**154.0.8035**, no packages or licensing changes were introduced.
+
+Tests cover atomic range/positions, distinct instances and physical identities, edits/history/dirty,
+original bookmark identity, 1,001-page metadata-only import, raster/text/thumbnail routing and reuse,
+staged replacement/disposal, actual interleaved output/text/source protection and repeat Save, and
+print source routing without spooling. The ignored WinForms harness additionally exercises real
+two-source import/search/copy reconstruction, edits/Undo/Redo/current-page behavior, Save As/reopen,
+print snapshot/raster and replacement/repeated disposal. It leaves the OS clipboard untouched.
+Physical printers, arbitrary real-world PDFs and interactive accessibility review remain manual QA.
